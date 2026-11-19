@@ -25,6 +25,8 @@ OPTIONS:
                               (transparent window; four grey levels). Sets the output size.
         --scale N             Integer upscale for framed output (default 4 -> 640x576)
         --no-autocontrast     Skip the contrast stretch before dithering
+        --contrast GAIN       Manual contrast around mid-grey (1.0 = no change,
+                              e.g. 1.5)
     -f, --format png|webp     Format when the output name is generated (default png)
     -O, --output PATH         Output file (default: INPUT_dithered.png; one input only)
         --gui                 Open the window
@@ -80,6 +82,8 @@ pub struct Cli {
     pub frame: FrameSel,
     pub scale: usize,
     pub autocontrast: bool,
+    /// Manual contrast gain around mid-grey; 1.0 = no change.
+    pub contrast: f64,
     pub gui: bool,
     pub debug: bool,
     pub help: bool,
@@ -102,6 +106,7 @@ impl Default for Cli {
             frame: FrameSel::None,
             scale: 4,
             autocontrast: true,
+            contrast: 1.0,
             gui: false,
             debug: false,
             help: false,
@@ -169,6 +174,14 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             "-d" | "--debug" => c.debug = true,
             "--gui" => c.gui = true,
             "--no-autocontrast" => c.autocontrast = false,
+            "--contrast" => {
+                let v = value(&key)?;
+                let n: f64 = v.trim().parse().map_err(|_| format!("{key} needs a number, got '{v}'"))?;
+                if !n.is_finite() || n < 0.0 {
+                    return Err(format!("--contrast must be at least 0, got '{v}'"));
+                }
+                c.contrast = n;
+            }
             "-o" | "--output-size" => c.output_size = Some(parse_size(&value(&key)?)?),
             "--output-width" => {
                 let v = value(&key)?;
@@ -314,6 +327,17 @@ mod tests {
         assert_eq!(c.frame, FrameSel::Builtin);
         assert_eq!(default_output("/a/b/photo.jpg", Format::Png), "/a/b/photo_dithered.png");
         assert_eq!(default_output("photo.jpg", Format::Webp), "photo_dithered.webp");
+    }
+
+    #[test]
+    fn contrast_is_parsed() {
+        let c = parse(&a(&["--contrast", "1.5", "x.jpg"])).unwrap();
+        assert_eq!(c.contrast, 1.5);
+        let c = parse(&a(&["--contrast=0.5", "x.jpg"])).unwrap();
+        assert_eq!(c.contrast, 0.5);
+        assert_eq!(parse(&a(&["--contrast"])).unwrap_err(), "--contrast needs a value");
+        assert!(parse(&a(&["--contrast", "x"])).is_err());
+        assert!(parse(&a(&["--contrast", "-1"])).is_err());
     }
 
     #[test]

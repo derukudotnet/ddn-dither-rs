@@ -23,6 +23,33 @@ const PROXY_MAX: usize = 1200;
 /// Longest side of the texture used to show the source photo.
 const DISPLAY_MAX: usize = 2048;
 
+/// Overlay lines drawn on top of the crop box to help alignment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Guides {
+    Off,
+    Thirds,
+    Cross,
+    Both,
+}
+
+impl Guides {
+    const ALL: [Guides; 4] = [Guides::Off, Guides::Thirds, Guides::Cross, Guides::Both];
+
+    fn next(self) -> Guides {
+        let i = Guides::ALL.iter().position(|&g| g == self).unwrap_or(0);
+        Guides::ALL[(i + 1) % Guides::ALL.len()]
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Guides::Off => "Off",
+            Guides::Thirds => "Thirds",
+            Guides::Cross => "Cross",
+            Guides::Both => "Thirds + cross",
+        }
+    }
+}
+
 const ASPECT_PRESETS: [(&str, f64); 8] = [
     ("Custom", 0.0),
     ("16:7", 16.0 / 7.0),
@@ -60,6 +87,7 @@ struct RenderKey {
     frame: Option<usize>,
     scale: usize,
     autocontrast: bool,
+    contrast: f64,
     contain: bool,
     proxy: bool,
     source_id: u64,
@@ -88,6 +116,8 @@ struct App {
     pixel_size: usize,
     fit_contain: bool,
     autocontrast: bool,
+    contrast: f64,
+    guides: Guides,
     format: Format,
 
     frames: Vec<Frame>,
@@ -105,6 +135,13 @@ struct App {
     output_override: Option<String>,
     exit_on_save: bool,
     status: String,
+    /// Native Wayland gets no file-drop events from winit 0.29 (X11/Windows/macOS do).
+    dnd_native_wayland: bool,
+}
+
+fn wayland_native() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && !std::env::var("WINIT_UNIX_BACKEND").map(|v| v.eq_ignore_ascii_case("x11")).unwrap_or(false)
 }
 
 pub fn run(cli: Cli) -> Result<(), String> {
@@ -171,6 +208,8 @@ impl App {
             pixel_size: cli.pixel_size,
             fit_contain: cli.crop_mode == CropMode::Contain,
             autocontrast: cli.autocontrast,
+            contrast: cli.contrast,
+            guides: Guides::Thirds,
             format: cli.format,
             frames,
             frame_idx,
@@ -185,6 +224,7 @@ impl App {
             exit_on_save: !cli.inputs.is_empty(),
             status,
             cli,
+            dnd_native_wayland: wayland_native(),
         };
         if let Some(first) = app.cli.inputs.first().cloned() {
             app.load(&cc.egui_ctx, &first);
@@ -281,6 +321,7 @@ impl App {
             frame: self.frame(),
             frame_scale: self.frame_scale,
             autocontrast: self.autocontrast,
+            contrast: self.contrast,
         }
     }
 
@@ -305,6 +346,7 @@ impl App {
             frame: self.frame_idx,
             scale: self.frame_scale,
             autocontrast: self.autocontrast,
+            contrast: self.contrast,
             contain: self.fit_contain,
             proxy: use_proxy,
             source_id: self.source_id,
@@ -441,8 +483,18 @@ impl App {
                     let name = self.frames[i].name.clone();
                     ui.selectable_value(&mut self.frame_idx, Some(i), name);
                 }
-            });
-        if ui.small_button("Load frame file…").clicked() {
+            })
+            .response
+            .on_hover_text(
+                "A frame is four-tone art with a transparent window for the photo. It sets the output size and locks the crop to the window's aspect.",
+            );
+        if ui
+            .small_button("Load frame file…")
+            .on_hover_text(
+                "PNG with a transparent window. You can also put frame PNGs in frames/ next to the executable or ~/.config/ddn-dither/frames/.",
+            )
+            .clicked()
+        {
             self.load_frame_dialog();
         }
         // Copy what we need out of the frame so `self` is free to be edited below.
@@ -462,6 +514,12 @@ impl App {
             });
             let s = self.frame_scale.max(1);
             ui.label(format!("Output {}×{} px (set by the frame)", fw * s, fh * s));
+            ui.add(
+                egui::Slider::new(&mut self.frame_scale, 1..=16)
+                    .custom_formatter(|n, _| format!("×{n:.0}"))
+                    .text("Scale"),
+            )
+            .on_hover_text("Integer upscale of the framed image. ×4 makes 640×576 for the built-in frame.");
         }
         ui.separator();
 
@@ -475,7 +533,11 @@ impl App {
                     for (i, (name, _)) in ASPECT_PRESETS.iter().enumerate() {
                         ui.selectable_value(&mut self.aspect_idx, i, *name);
                     }
-                });
+                })
+                .response
+                .on_hover_text(
+                    "The crop box always has exactly this aspect ratio. With a frame, the frame's window wins.",
+                );
             if self.aspect_idx != before_idx && self.aspect_idx != 0 {
                 let a = ASPECT_PRESETS[self.aspect_idx].1;
                 self.out_h = ((self.out_w as f64 / a).round() as usize).max(1);
@@ -486,7 +548,9 @@ impl App {
                 ui.add(egui::DragValue::new(&mut self.out_w).range(1..=16384));
                 ui.label("H");
                 ui.add(egui::DragValue::new(&mut self.out_h).range(1..=16384));
-            });
+            })
+            .response
+            .on_hover_text("Output size in pixels. With an aspect preset, changing one side adjusts the other.");
             if self.aspect_idx != 0 {
                 let a = ASPECT_PRESETS[self.aspect_idx].1;
                 if self.out_w != ow {
@@ -498,8 +562,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label("Pixel size");
                 ui.add(
-                    egui::DragValue::new(&mut self.pixel_size)
-                        .range(0..=64)
+                    egui::Slider::new(&mut self.pixel_size, 0..=32)
                         .custom_formatter(|n, _| if n == 0.0 { "auto".to_string() } else { format!("{n:.0}") })
                         .custom_parser(|s| {
                             if s.trim().eq_ignore_ascii_case("auto") { Some(0.0) } else { s.trim().parse::<f64>().ok() }
@@ -508,10 +571,36 @@ impl App {
                 if self.pixel_size == 0 {
                     ui.weak(format!("→ {}", pipeline::auto_pixel_size(self.out_w)));
                 }
-            });
+            })
+            .response
+            .on_hover_text(
+                "Output pixels per dithered pixel. auto aims for ~384 dithered pixels across; bigger = blockier.",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Contrast");
+                ui.add(
+                    egui::Slider::new(&mut self.contrast, 0.25..=4.0)
+                        .custom_formatter(|n, _| format!("{n:.2}"))
+                        .custom_parser(|s| s.trim().parse::<f64>().ok()),
+                );
+                if ui.small_button("Reset").on_hover_text("Back to no extra contrast (1.00)").clicked() {
+                    self.contrast = 1.0;
+                }
+            })
+            .response
+            .on_hover_text("Manual contrast around mid-grey, applied after auto contrast. 1.00 = no change.");
         });
-        ui.checkbox(&mut self.fit_contain, "Fit whole image (pad instead of crop)");
-        ui.checkbox(&mut self.autocontrast, "Auto contrast");
+        ui.checkbox(&mut self.fit_contain, "Fit whole image (pad instead of crop)")
+            .on_hover_text("Scales the whole picture into the output instead of cropping it; the padding uses the darkest tone.");
+        ui.checkbox(&mut self.autocontrast, "Auto contrast")
+            .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
+        if ui
+            .button(format!("Guides: {}", self.guides.name()))
+            .on_hover_text("Guide lines over the crop box to help alignment: rule-of-thirds lines and/or a full-size crosshair through the crop centre.")
+            .clicked()
+        {
+            self.guides = self.guides.next();
+        }
         ui.separator();
 
         // ---- palette
@@ -526,7 +615,9 @@ impl App {
                     ui.selectable_value(&mut self.pal_idx, i, *n);
                 }
                 ui.selectable_value(&mut self.pal_idx, custom_idx, "custom");
-            });
+            })
+            .response
+            .on_hover_text("Recolour any time — changing the palette never re-dithers.");
         if self.pal_idx < custom_idx {
             self.palette = palette::BUILTIN[self.pal_idx].1;
             self.pal_error = None;
@@ -539,7 +630,8 @@ impl App {
                     .join(",");
             }
         } else {
-            ui.label("Four hex colours, darkest first:");
+            ui.label("Four hex colours, darkest first:")
+                .on_hover_text("3-digit shorthand like #0f0 works.");
             if ui.text_edit_singleline(&mut self.custom_pal_text).changed() || before_pal != self.pal_idx {
                 match palette::resolve(&self.custom_pal_text) {
                     Ok(p) => {
@@ -571,14 +663,24 @@ impl App {
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.format, Format::Png, "PNG (indexed)");
                 ui.selectable_value(&mut self.format, Format::Webp, "WebP (lossless)");
-            });
+            })
+            .response
+            .on_hover_text("PNG output is 2-bit indexed (a few KB). WebP is lossless full-colour and bigger.");
         let have = self.source.is_some();
         ui.horizontal(|ui| {
             let label = if self.exit_on_save { "Save & quit  (Enter)" } else { "Save  (Enter)" };
-            if ui.add_enabled(have, egui::Button::new(label)).clicked() {
+            if ui
+                .add_enabled(have, egui::Button::new(label))
+                .on_hover_text("Saves to the destination shown below, replacing an earlier file of the same name.")
+                .clicked()
+            {
                 self.quick_save(ctx);
             }
-            if ui.add_enabled(have, egui::Button::new("Save as…")).clicked() {
+            if ui
+                .add_enabled(have, egui::Button::new("Save as…"))
+                .on_hover_text("Opens a file dialog to pick the destination.")
+                .clicked()
+            {
                 self.save_as();
             }
         });
@@ -592,14 +694,24 @@ impl App {
         ui.separator();
         ui.label(&self.status);
         ui.add_space(6.0);
-        ui.weak("Drag inside the box to move it; drag a handle to resize (opposite side stays put). Drop another image anywhere to switch. Esc closes.");
+        let hint = if self.dnd_native_wayland {
+            "Drag inside the box to move it; drag a handle to resize (opposite side stays put). Esc closes."
+        } else {
+            "Drag inside the box to move it; drag a handle to resize (opposite side stays put). Drop another image anywhere to switch. Esc closes."
+        };
+        ui.weak(hint);
     }
 
     fn main_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         let Some((tex_id, iw, ih)) = self.source.as_ref().map(|s| (s.tex.id(), s.w as f64, s.h as f64)) else {
+            let prompt = if self.dnd_native_wayland {
+                "Drag & drop does not work on Wayland yet — click “Open image…”"
+            } else {
+                "Drop an image here, or click “Open image…”"
+            };
             ui.centered_and_justified(|ui| {
-                ui.heading(if hovering { "Release to open" } else { "Drop an image here, or click “Open image…”" });
+                ui.heading(if hovering { "Release to open" } else { prompt });
             });
             return;
         };
@@ -679,6 +791,22 @@ impl App {
                 let r = Rect::from_center_size(p, vec2(9.0, 9.0));
                 painter.rect_filled(r, 0.0, Color32::WHITE);
                 painter.rect_stroke(r, 0.0, Stroke::new(1.0_f32, Color32::BLACK));
+            }
+            if self.guides != Guides::Off {
+                let thin = Stroke::new(1.0_f32, Color32::from_white_alpha(110));
+                if matches!(self.guides, Guides::Thirds | Guides::Both) {
+                    for i in 1..3 {
+                        let fx = crop_rect.min.x + crop_rect.width() * i as f32 / 3.0;
+                        painter.line_segment([pos2(fx, crop_rect.min.y), pos2(fx, crop_rect.max.y)], thin);
+                        let fy = crop_rect.min.y + crop_rect.height() * i as f32 / 3.0;
+                        painter.line_segment([pos2(crop_rect.min.x, fy), pos2(crop_rect.max.x, fy)], thin);
+                    }
+                }
+                if matches!(self.guides, Guides::Cross | Guides::Both) {
+                    let c = crop_rect.center();
+                    painter.line_segment([pos2(img_rect.min.x, c.y), pos2(img_rect.max.x, c.y)], thin);
+                    painter.line_segment([pos2(c.x, img_rect.min.y), pos2(c.x, img_rect.max.y)], thin);
+                }
             }
             let sel = format!("Crop {}×{} px", cb.w.round(), cb.h.round());
             painter.text(

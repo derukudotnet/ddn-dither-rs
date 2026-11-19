@@ -105,6 +105,7 @@ fn convert_one(cli: &Cli, input: &str, pal: &palette::Palette, frame: Option<&Fr
         frame,
         frame_scale: cli.scale,
         autocontrast: cli.autocontrast,
+        contrast: cli.contrast,
     };
     if cli.crop_mode == CropMode::Cover {
         let aspect = pipeline::crop_aspect(&params);

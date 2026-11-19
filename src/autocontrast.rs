@@ -1,4 +1,5 @@
-//! Port of Pillow's `ImageOps.autocontrast(img, cutoff=(lo, hi))` for one grey plane.
+//! Port of Pillow's `ImageOps.autocontrast(img, cutoff=(lo, hi))` for one grey plane,
+//! plus a manual contrast adjustment around mid-grey.
 
 use crate::gray::Plane;
 
@@ -57,6 +58,28 @@ pub fn lut(hist: &[u64; 256], cutoff: (f64, f64)) -> [u8; 256] {
     out
 }
 
+/// Look-up table that boosts contrast around mid-grey. `gain` 1.0 = unchanged,
+/// > 1.0 = more contrast, < 1.0 = washed out.
+pub fn contrast_lut(gain: f64) -> [u8; 256] {
+    let mut out = [0u8; 256];
+    for (i, o) in out.iter_mut().enumerate() {
+        let v = 128.0 + (i as f64 - 128.0) * gain;
+        *o = v.round().clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
+/// Apply manual contrast to a plane. A gain of 1.0 leaves the image unchanged.
+pub fn contrast(p: &mut Plane, gain: f64) {
+    if (gain - 1.0).abs() < 1e-9 {
+        return;
+    }
+    let lut = contrast_lut(gain);
+    for v in p.data.iter_mut() {
+        *v = lut[*v as usize];
+    }
+}
+
 pub fn autocontrast(p: &mut Plane, cutoff: (f64, f64)) {
     let mut hist = [0u64; 256];
     for &v in &p.data {
@@ -85,5 +108,23 @@ mod tests {
         let mut p = Plane::filled(5, 5, 77);
         autocontrast(&mut p, DEFAULT_CUTOFF);
         assert!(p.data.iter().all(|&v| v == 77));
+        let mut p = Plane::filled(5, 5, 128);
+        contrast(&mut p, 2.0);
+        assert!(p.data.iter().all(|&v| v == 128));
+    }
+
+    #[test]
+    fn contrast_gain_one_is_nop_and_doubles_push_outwards() {
+        let p0 = Plane::new(5, 1, vec![0, 64, 128, 192, 255]);
+        let mut p = p0.clone();
+        contrast(&mut p, 1.0);
+        assert_eq!(p.data, p0.data);
+        let mut p = p0.clone();
+        contrast(&mut p, 2.0);
+        assert_eq!(p.data, vec![0, 0, 128, 255, 255]);
+        let mut p = p0.clone();
+        contrast(&mut p, 0.5);
+        assert_eq!(p.data, vec![64, 96, 128, 160, 192]);
+        assert_eq!(contrast_lut(2.0)[128], 128);
     }
 }

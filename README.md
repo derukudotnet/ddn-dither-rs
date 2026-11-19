@@ -42,11 +42,18 @@ ddn-dither                                # window, drop an image onto it
 * **Enter** saves. When started from the command line with a file, Enter saves and quits; Esc always closes the window.
 * Size: aspect presets + width/height. With a preset the other dimension follows; choose
   *Custom* to set both freely. The crop box always has exactly the output's aspect ratio.
-* **Pixel size** = output pixels per dithered pixel (whole numbers → crisp, even blocks).
+* **Pixel size** slider = output pixels per dithered pixel (whole numbers → crisp, even blocks).
   *auto* aims for about 384 dithered pixels across.
+* **Contrast** slider boosts or softens contrast around mid-grey, on top of auto contrast (1.00 = no change).
+* **Guides** over the crop box: rule-of-thirds lines or a crosshair through the crop centre, to help alignment.
 * **Fit whole image** pads instead of cropping (padding uses the darkest tone).
 * Palette: ddn, green, bw, pocket, color, or your own four hex colours (darkest first; 3-digit shorthand like `#0f0` works).
 * Switching palette or recolouring happens instantly — the dithered grid is cached and only recoloured.
+* Every control has a tooltip; hover (or long-press) it for details.
+* Drag & drop from a file manager works on X11 and on Windows/macOS. On native Wayland the
+  window cannot receive file drops yet (a limitation of the windowing library, not this tool);
+  use “Open image…” — or run `WINIT_UNIX_BACKEND=x11 ddn-dither` (XWayland) and drop away.
+  The window tells you which of the two applies to your session.
 
 ### Frames
 
@@ -56,6 +63,14 @@ has more greys is converted to four tones on load (with the same thresholds as t
 and the window tells you.
 
 * Built in: the Deruku frame (160×144, 128×112 window).
+
+  A *built-in* frame (compiled into the executable, no extra files needed) is a
+  four-tone PNG with a transparent window, converted to a compact `.bin`:
+  `tools/genframe.py myframe.png assets/frame_myframe.bin` (needs Pillow; the script
+  reproduces `assets/frame_default.bin` from `assets/frame_deruku_4tone.png` byte for
+  byte). Then load the file with `include_bytes!` next to `Frame::builtin()` in
+  `src/frame.rs` and add a function like it. For one-off frames, the `frames/` folders
+  below are easier — drop the plain PNG there and the window picks it up.
 * More frames: put PNGs in `frames/` next to the executable or in `~/.config/ddn-dither/frames/`.
 * With a frame, the crop is locked to the window's aspect ratio and the output size is the frame
   size × **Scale** (default 4).
@@ -76,7 +91,7 @@ and the window tells you.
 tools/verify.sh /path/to/the/python/repo    # needs only rustc + Python with Pillow/numpy
 ```
 
-This runs the unit tests (33) and compares the Rust pipeline with Pillow's `resize(LANCZOS, box=…)`,
+This runs the unit tests (36) and compares the Rust pipeline with Pillow's `resize(LANCZOS, box=…)`,
 `ImageOps.autocontrast(cutoff=(0,10))` and the original `bayer_dither_4tone`, with and without the
 frame: all identical pixel for pixel.
 
