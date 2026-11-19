@@ -19,6 +19,7 @@ OPTIONS:
         --crop-mode MODE      cover (centre crop, default), contain (pad), interactive (window)
     -p, --palette SPEC        ddn (default), green, bw, pocket, color, or four hex colours
                               darkest first, e.g. '#0f0f0f,#4a4a4a,#868686,#c1c1c1'
+                              (3-digit shorthand like '#0f0' works)
         --pixel-size N        Output pixels per dithered pixel (default: auto, about 384 across)
         --frame SPEC          none (default), default (built-in), or the path of a frame PNG
                               (transparent window; four grey levels). Sets the output size.

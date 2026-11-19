@@ -146,7 +146,7 @@ impl Rendered {
 
     /// RGB at the native (not upscaled) grid resolution, e.g. for a preview texture.
     pub fn rgb_native(&self, pal: &Palette) -> Vec<u8> {
-        self.levels.iter().flat_map(|&l| pal[l as usize & 3]).collect()
+        crate::palette::colour_levels(&self.levels, pal)
     }
 }
 

@@ -2,7 +2,9 @@
 
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "gui")]
+use std::path::PathBuf;
 
 use ddn_dither::frame::Frame;
 use ddn_dither::gray::RgbImage;
@@ -35,6 +37,8 @@ pub fn load_frame(path: &str) -> Result<Frame, String> {
 }
 
 /// Folders searched for extra frames: `frames/` next to the executable and the user config dir.
+/// (Only the window browses frame folders; the CLI takes an explicit path.)
+#[cfg(feature = "gui")]
 pub fn frame_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -52,6 +56,7 @@ pub fn frame_dirs() -> Vec<PathBuf> {
 }
 
 /// All frame PNGs found in `frame_dirs()`, with a warning for each that cannot be used.
+#[cfg(feature = "gui")]
 pub fn discover_frames() -> (Vec<Frame>, Vec<String>) {
     let mut frames = Vec::new();
     let mut warnings = Vec::new();

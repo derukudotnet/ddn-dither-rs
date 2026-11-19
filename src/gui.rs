@@ -50,6 +50,8 @@ struct DragState {
     ptr: (f64, f64),
 }
 
+/// What the preview render depends on, except the palette: switching palettes only
+/// needs a recolour of the cached level grid, not a new Lanczos+dither pass.
 #[derive(Clone, PartialEq)]
 struct RenderKey {
     crop: [f64; 4],
@@ -59,7 +61,6 @@ struct RenderKey {
     scale: usize,
     autocontrast: bool,
     contain: bool,
-    palette: Palette,
     proxy: bool,
     source_id: u64,
 }
@@ -67,6 +68,8 @@ struct RenderKey {
 struct Preview {
     tex: TextureHandle,
     grid: (usize, usize),
+    levels: Vec<u8>,
+    palette: Palette,
 }
 
 struct App {
@@ -303,7 +306,6 @@ impl App {
             scale: self.frame_scale,
             autocontrast: self.autocontrast,
             contain: self.fit_contain,
-            palette: self.palette,
             proxy: use_proxy,
             source_id: self.source_id,
         }
@@ -316,6 +318,17 @@ impl App {
         let use_proxy = self.drag.is_some();
         let key = self.render_key(use_proxy);
         if self.last_key.as_ref() == Some(&key) {
+            if let Some(pv) = &mut self.preview {
+                if pv.palette != self.palette {
+                    let img = egui::ColorImage::from_rgb(
+                        [pv.grid.0, pv.grid.1],
+                        &palette::colour_levels(&pv.levels, &self.palette),
+                    );
+                    pv.tex.set(img, TextureOptions::NEAREST);
+                    pv.palette = self.palette;
+                    ctx.request_repaint();
+                }
+            }
             return;
         }
         if let Some(r) = self.render_levels(use_proxy) {
@@ -325,7 +338,12 @@ impl App {
                 egui::ColorImage::from_rgb([r.grid_w, r.grid_h], &rgb),
                 TextureOptions::NEAREST,
             );
-            self.preview = Some(Preview { tex, grid: (r.grid_w, r.grid_h) });
+            self.preview = Some(Preview {
+                tex,
+                grid: (r.grid_w, r.grid_h),
+                levels: r.levels,
+                palette: self.palette,
+            });
             self.last_key = Some(key);
             ctx.request_repaint();
         }
@@ -333,9 +351,9 @@ impl App {
 
     // ---------------------------------------------------------------- saving
 
-    fn default_output_path(&mut self) -> Option<String> {
+    fn default_output_path(&self) -> Option<String> {
         let src = self.source.as_ref()?;
-        Some(self.output_override.take().unwrap_or_else(|| cli::default_output(&src.path, self.format)))
+        Some(self.output_override.clone().unwrap_or_else(|| cli::default_output(&src.path, self.format)))
     }
 
     fn save_to(&mut self, path: &str) -> bool {
@@ -574,7 +592,7 @@ impl App {
         ui.separator();
         ui.label(&self.status);
         ui.add_space(6.0);
-        ui.weak("Drag inside the box to move it; drag a handle to resize (opposite side stays put). Drop another image anywhere to switch.");
+        ui.weak("Drag inside the box to move it; drag a handle to resize (opposite side stays put). Drop another image anywhere to switch. Esc closes.");
     }
 
     fn main_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -646,7 +664,7 @@ impl App {
                 0.0,
                 dim,
             );
-            painter.rect_stroke(crop_rect, 0.0, Stroke::new(2.0, Color32::WHITE));
+            painter.rect_stroke(crop_rect, 0.0, Stroke::new(2.0_f32, Color32::WHITE));
             let c = crop_rect.center();
             for p in [
                 crop_rect.left_top(),
@@ -660,7 +678,7 @@ impl App {
             ] {
                 let r = Rect::from_center_size(p, vec2(9.0, 9.0));
                 painter.rect_filled(r, 0.0, Color32::WHITE);
-                painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK));
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0_f32, Color32::BLACK));
             }
             let sel = format!("Crop {}×{} px", cb.w.round(), cb.h.round());
             painter.text(
@@ -726,12 +744,12 @@ impl eframe::App for App {
             self.load(ctx, &p.to_string_lossy());
         }
 
-        // Keyboard: Enter saves, Esc quits (only when started from the command line with a file)
+        // Keyboard: Enter saves, Esc closes the window
         if !ctx.wants_keyboard_input() {
             if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && self.source.is_some() {
                 self.quick_save(ctx);
             }
-            if self.exit_on_save && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
