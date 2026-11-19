@@ -80,6 +80,19 @@ and the window tells you.
   will load it at start-up. For a design source of truth, encoding it into `assets/`
   makes it part of the executable itself.
 * More frames: put PNGs in `frames/` next to the executable or in `~/.config/ddn-dither/frames/`.
+
+### Frames and copyright
+
+Frame art you did not draw yourself — the original Game Boy Camera frames are
+Nintendo's — should stay out of published git repositories. Everything described
+above works without committing any of it:
+
+* runtime frames live in `frames/` or `~/.config/ddn-dither/frames/` (never in the repo);
+* locally built-in frames are genuinely embedded in your binary, and this repo's
+  `.gitignore` keeps `assets/frame_*.bin` out of git except the original `frame_deruku.bin`.
+
+This repository stays free of third-party art, and every user supplies whatever frames
+they are entitled to use themselves.
 * With a frame, the crop is locked to the window's aspect ratio and the output size is the frame
   size × **Scale** (default 4).
 
