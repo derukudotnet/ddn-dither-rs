@@ -6,7 +6,11 @@
 # The thresholds match dither.rs: luma >= 64/128/192 -> level 1/2/3,
 # luma uses Pillow's RGB->L weights (as in gray.rs).
 #
-# Usage: tools/genframe.py FRAME.png assets/frame_NAME.bin   (needs Pillow)
+# Usage: tools/genframe.py FRAME.png assets/frame_<id>.bin   (needs Pillow)
+#
+# The part after `frame_` in the output file name is the frame id, which selects
+# the frame (`--frame <id>`, window dropdown). build.rs collects every
+# assets/frame_*.bin automatically when the project is built.
 import struct
 import sys
 from pathlib import Path

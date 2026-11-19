@@ -64,13 +64,21 @@ and the window tells you.
 
 * Built in: the Deruku frame (160×144, 128×112 window).
 
-  A *built-in* frame (compiled into the executable, no extra files needed) is a
-  four-tone PNG with a transparent window, converted to a compact `.bin`:
-  `tools/genframe.py myframe.png assets/frame_myframe.bin` (needs Pillow; the script
-  reproduces `assets/frame_default.bin` from `assets/frame_deruku_4tone.png` byte for
-  byte). Then load the file with `include_bytes!` next to `Frame::builtin()` in
-  `src/frame.rs` and add a function like it. For one-off frames, the `frames/` folders
-  below are easier — drop the plain PNG there and the window picks it up.
+  **Adding built-in frames is automatic.** A *built-in* frame is a four-tone PNG with a
+  transparent window converted to a compact `.bin` — no `include_bytes!`, no extra Rust
+  function, nothing to register. Two steps:
+
+  1. `tools/genframe.py myframe.png assets/frame_myframe.bin` (needs Pillow; the script
+     reproduces `assets/frame_deruku.bin` from `assets/frame_deruku_4tone.png` byte for byte).
+     The part after `frame_` in the file name is the frame id (`myframe` above).
+  2. Rebuild. `build.rs` collects every `assets/frame_*.bin` at compile time, so the frame
+     appears in the window's frame list and can be selected with `--frame myframe`.
+     (`--frame default`/`--frame builtin` keeps meaning the first one in file-name order.)
+
+  If you skip step 1 you don't even need a rebuild: drop the plain PNG in a `frames/`
+  folder (next to the executable, or in `~/.config/ddn-dither/frames/`) and the window
+  will load it at start-up. For a design source of truth, encoding it into `assets/`
+  makes it part of the executable itself.
 * More frames: put PNGs in `frames/` next to the executable or in `~/.config/ddn-dither/frames/`.
 * With a frame, the crop is locked to the window's aspect ratio and the output size is the frame
   size × **Scale** (default 4).
@@ -109,6 +117,7 @@ src/lib.rs + gray, resample, autocontrast, dither, palette, frame, cropbox, pipe
                               std-only core (unit-tested)
 src/io.rs, src/main.rs        file I/O and command line
 src/gui.rs                    window (feature "gui", on by default)
-assets/                       built-in frame (PNG + raw levels used by the build)
+assets/                       built-in frames (frame_*.bin, auto-registered by build.rs)
+                              + frame_deruku_4tone.png, the source of frame_deruku.bin
 tools/                        verification harness and scripts
 ```

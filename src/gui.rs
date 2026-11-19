@@ -165,8 +165,8 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>, cli: Cli) -> App {
         let mut status = String::new();
 
-        // Frames: built-in first, then any found in the frames folders.
-        let mut frames = vec![Frame::builtin()];
+        // Frames: built-ins first (all assets/frame_<id>.bin), then the frames folders.
+        let mut frames: Vec<Frame> = Frame::builtins().collect();
         let (found, warnings) = io::discover_frames();
         frames.extend(found);
         if !warnings.is_empty() {
@@ -176,6 +176,10 @@ impl App {
         match &cli.frame {
             FrameSel::None => {}
             FrameSel::Builtin => frame_idx = Some(0),
+            FrameSel::Name(id) => match Frame::builtin_named(id) {
+                Some(f) => frame_idx = frames.iter().position(|g| g.name == f.name),
+                None => status = format!("unknown built-in frame '{id}'"),
+            },
             FrameSel::Path(p) => match io::load_frame(p) {
                 Ok(f) => {
                     frames.push(f);

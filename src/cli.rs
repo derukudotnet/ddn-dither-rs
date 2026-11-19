@@ -21,8 +21,10 @@ OPTIONS:
                               darkest first, e.g. '#0f0f0f,#4a4a4a,#868686,#c1c1c1'
                               (3-digit shorthand like '#0f0' works)
         --pixel-size N        Output pixels per dithered pixel (default: auto, about 384 across)
-        --frame SPEC          none (default), default (built-in), or the path of a frame PNG
+        --frame SPEC          none (default), default (built-in), the id of a compiled-in
+                              frame (assets/frame_<id>.bin), or the path of a frame PNG
                               (transparent window; four grey levels). Sets the output size.
+                              --help shows the compiled-in ids; default picks the first.
         --scale N             Integer upscale for framed output (default 4 -> 640x576)
         --no-autocontrast     Skip the contrast stretch before dithering
         --contrast GAIN       Manual contrast around mid-grey (1.0 = no change,
@@ -62,7 +64,10 @@ impl Format {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrameSel {
     None,
+    /// The first built-in (`--frame default`/`--frame builtin`).
     Builtin,
+    /// A compiled-in frame by id (`--frame deruku`).
+    Name(String),
     Path(String),
 }
 
@@ -212,6 +217,7 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
                 c.frame = match v.as_str() {
                     "none" => FrameSel::None,
                     "default" | "builtin" => FrameSel::Builtin,
+                    _ if crate::frame::Frame::builtin_ids().contains(&v.as_str()) => FrameSel::Name(v),
                     _ => FrameSel::Path(v),
                 };
             }
@@ -325,6 +331,12 @@ mod tests {
     fn frame_and_defaults() {
         let c = parse(&a(&["--frame", "default"])).unwrap();
         assert_eq!(c.frame, FrameSel::Builtin);
+        for id in crate::frame::Frame::builtin_ids() {
+            let c = parse(&a(&["--frame", id])).unwrap();
+            assert_eq!(c.frame, FrameSel::Name(id.to_string()));
+        }
+        let c = parse(&a(&["--frame", "not-a-built-in"])).unwrap();
+        assert_eq!(c.frame, FrameSel::Path("not-a-built-in".to_string()));
         assert_eq!(default_output("/a/b/photo.jpg", Format::Png), "/a/b/photo_dithered.png");
         assert_eq!(default_output("photo.jpg", Format::Webp), "photo_dithered.webp");
     }

@@ -15,7 +15,7 @@ from ddn_dither.dithering import bayer_dither_4tone  # original implementation, 
 
 TMP = tempfile.mkdtemp()
 rng = np.random.default_rng(42)
-FRAME_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "frame_default.bin")
+FRAME_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "frame_deruku.bin")
 
 
 def photo(w, h, seed):

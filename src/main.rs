@@ -56,6 +56,13 @@ fn load_selected_frame(sel: &FrameSel) -> Result<Option<Frame>, String> {
     match sel {
         FrameSel::None => Ok(None),
         FrameSel::Builtin => Ok(Some(Frame::builtin())),
+        FrameSel::Name(id) => match Frame::builtin_named(id) {
+            Some(f) => Ok(Some(f)),
+            None => Err(format!(
+                "unknown built-in frame '{id}' (compiled in: {})",
+                if Frame::builtin_ids().is_empty() { "none".to_string() } else { Frame::builtin_ids().join(", ") }
+            )),
+        },
         FrameSel::Path(p) => io::load_frame(p).map(Some),
     }
 }
