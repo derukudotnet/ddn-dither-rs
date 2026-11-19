@@ -24,11 +24,21 @@ pub fn names() -> Vec<&'static str> {
 
 pub fn parse_hex(s: &str) -> Result<Rgb, String> {
     let t = s.trim().trim_start_matches('#');
+    let t: String = if t.len() == 3 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+        t.chars().flat_map(|c| [c, c]).collect()
+    } else {
+        t.to_string()
+    };
     if t.len() != 6 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("'{s}' is not a colour like #303a1d"));
     }
-    let v = u32::from_str_radix(t, 16).map_err(|e| e.to_string())?;
+    let v = u32::from_str_radix(&t, 16).map_err(|e| e.to_string())?;
     Ok([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+}
+
+/// Colour a buffer of dither levels (0..=3) with `pal`, as interleaved RGB.
+pub fn colour_levels(levels: &[u8], pal: &Palette) -> Vec<u8> {
+    levels.iter().flat_map(|&l| pal[l as usize & 3]).collect()
 }
 
 /// Accepts a built-in name ("green") or four comma-separated hex colours, darkest first.
@@ -61,5 +71,8 @@ mod tests {
         assert_eq!(p, by_name("bw").unwrap());
         assert!(resolve("nope").is_err());
         assert!(parse_hex("#12345").is_err());
+        assert_eq!(parse_hex("#555").unwrap(), [85, 85, 85]);
+        assert_eq!(parse_hex("0f380f").unwrap(), [15, 56, 15]);
+        assert_eq!(colour_levels(&[0, 3], &by_name("bw").unwrap()), vec![0, 0, 0, 255, 255, 255]);
     }
 }

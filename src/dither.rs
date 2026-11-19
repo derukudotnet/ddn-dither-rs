@@ -48,8 +48,8 @@ mod tests {
     #[test]
     fn mid_grey_mixes_two_levels() {
         let out = bayer_4tone(&[100; 16], 4, 4);
-        assert!(out.iter().any(|&l| l == 1));
-        assert!(out.iter().any(|&l| l == 0));
+        assert!(out.contains(&1));
+        assert!(out.contains(&0));
         assert!(out.iter().all(|&l| l <= 1));
     }
 

@@ -39,13 +39,14 @@ ddn-dither                                # window, drop an image onto it
 
 * Drop an image anywhere, or **Open image…**. Drag inside the box to move it; drag a handle to
   resize (the opposite corner/side stays fixed, aspect ratio is kept).
-* **Enter** saves. When started from the command line with a file, Enter saves and quits, Esc quits.
+* **Enter** saves. When started from the command line with a file, Enter saves and quits; Esc always closes the window.
 * Size: aspect presets + width/height. With a preset the other dimension follows; choose
   *Custom* to set both freely. The crop box always has exactly the output's aspect ratio.
 * **Pixel size** = output pixels per dithered pixel (whole numbers → crisp, even blocks).
   *auto* aims for about 384 dithered pixels across.
 * **Fit whole image** pads instead of cropping (padding uses the darkest tone).
-* Palette: ddn, green, bw, pocket, color, or your own four hex colours (darkest first).
+* Palette: ddn, green, bw, pocket, color, or your own four hex colours (darkest first; 3-digit shorthand like `#0f0` works).
+* Switching palette or recolouring happens instantly — the dithered grid is cached and only recoloured.
 
 ### Frames
 

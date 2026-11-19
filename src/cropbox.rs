@@ -118,6 +118,7 @@ impl CropBox {
 
     /// New box while dragging `handle`. `start` is the box when the drag began,
     /// `start_ptr` the pointer then, `ptr` the pointer now (all in image pixels).
+    #[allow(clippy::too_many_arguments)]
     pub fn drag(
         start: &CropBox,
         handle: Handle,

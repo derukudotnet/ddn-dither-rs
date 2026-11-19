@@ -89,9 +89,9 @@ fn precompute(in_size: usize, in0: f64, in1: f64, out_size: usize) -> Coeffs {
         let cnt = (xmax - xmin).max(0) as usize;
 
         let mut ww = 0.0;
-        for x in 0..cnt {
+        for (x, slot) in pre.iter_mut().take(cnt).enumerate() {
             let w = lanczos3(((x as i64 + xmin) as f64 - center + 0.5) * ss);
-            pre[x] = w;
+            *slot = w;
             ww += w;
         }
         if ww != 0.0 {

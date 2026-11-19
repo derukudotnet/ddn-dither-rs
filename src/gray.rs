@@ -40,12 +40,12 @@ impl RgbImage {
     }
 
     pub fn to_gray(&self) -> Plane {
-        let data = self.data.chunks_exact(3).map(|p| luma(p[0], p[1], p[2])).collect();
+        let data = self.data.as_chunks::<3>().0.iter().map(|p| luma(p[0], p[1], p[2])).collect();
         Plane { w: self.w, h: self.h, data }
     }
 
     pub fn plane(&self, channel: usize) -> Plane {
-        let data = self.data.chunks_exact(3).map(|p| p[channel]).collect();
+        let data = self.data.as_chunks::<3>().0.iter().map(|p| p[channel]).collect();
         Plane { w: self.w, h: self.h, data }
     }
 
