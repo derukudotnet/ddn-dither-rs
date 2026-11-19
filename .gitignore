@@ -1,3 +1,5 @@
 /target
 Cargo.lock.bak
 *.rlib
+/assets/frame_*.bin
+!assets/frame_deruku.bin

@@ -56,6 +56,13 @@ fn load_selected_frame(sel: &FrameSel) -> Result<Option<Frame>, String> {
     match sel {
         FrameSel::None => Ok(None),
         FrameSel::Builtin => Ok(Some(Frame::builtin())),
+        FrameSel::Name(id) => match Frame::builtin_named(id) {
+            Some(f) => Ok(Some(f)),
+            None => Err(format!(
+                "unknown built-in frame '{id}' (compiled in: {})",
+                if Frame::builtin_ids().is_empty() { "none".to_string() } else { Frame::builtin_ids().join(", ") }
+            )),
+        },
         FrameSel::Path(p) => io::load_frame(p).map(Some),
     }
 }
@@ -64,6 +71,13 @@ fn run_batch(cli: &Cli) -> Result<(), String> {
     let pal = palette::resolve(&cli.palette)?;
     let frame = load_selected_frame(&cli.frame)?;
     if let Some(f) = &frame {
+        if cli.debug {
+            eprintln!(
+                "debug: frame '{}' is {}x{}, window {}x{} at +{},+{}, {}",
+                f.name, f.w, f.h, f.hole.w, f.hole.h, f.hole.x, f.hole.y,
+                if f.hole_is_rect { "plain rectangle" } else { "art overlaps the window (photo shows through only the transparent pixels)" }
+            );
+        }
         if f.source_grey_values > 4 {
             eprintln!("note: frame '{}' used {} grey values; converted to 4 tones", f.name, f.source_grey_values);
         }
@@ -105,6 +119,7 @@ fn convert_one(cli: &Cli, input: &str, pal: &palette::Palette, frame: Option<&Fr
         frame,
         frame_scale: cli.scale,
         autocontrast: cli.autocontrast,
+        contrast: cli.contrast,
     };
     if cli.crop_mode == CropMode::Cover {
         let aspect = pipeline::crop_aspect(&params);

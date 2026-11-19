@@ -4,7 +4,7 @@
 //! integer upscale factor. The palette is applied afterwards (`Rendered::rgb`), so changing the
 //! palette never needs a re-dither.
 
-use crate::autocontrast::{autocontrast, DEFAULT_CUTOFF};
+use crate::autocontrast::{autocontrast, contrast, DEFAULT_CUTOFF};
 use crate::dither::bayer_4tone;
 use crate::frame::Frame;
 use crate::gray::Plane;
@@ -33,6 +33,8 @@ pub struct Params<'a> {
     /// Integer upscale of the framed 160x144 image.
     pub frame_scale: usize,
     pub autocontrast: bool,
+    /// Manual contrast gain around mid-grey (1.0 = no change).
+    pub contrast: f64,
 }
 
 pub struct Rendered {
@@ -67,7 +69,7 @@ pub fn crop_aspect(p: &Params) -> f64 {
     }
 }
 
-fn photo_levels(gray: &Plane, fit: &Fit, gw: usize, gh: usize, ac: bool) -> Vec<u8> {
+fn photo_levels(gray: &Plane, fit: &Fit, gw: usize, gh: usize, ac: bool, contrast_gain: f64) -> Vec<u8> {
     match fit {
         Fit::Cover(b) => {
             let b = b.clamped(gray.w, gray.h);
@@ -75,6 +77,7 @@ fn photo_levels(gray: &Plane, fit: &Fit, gw: usize, gh: usize, ac: bool) -> Vec<
             if ac {
                 autocontrast(&mut small, DEFAULT_CUTOFF);
             }
+            contrast(&mut small, contrast_gain);
             bayer_4tone(&small.data, gw, gh)
         }
         Fit::Contain => {
@@ -85,6 +88,7 @@ fn photo_levels(gray: &Plane, fit: &Fit, gw: usize, gh: usize, ac: bool) -> Vec<
             if ac {
                 autocontrast(&mut small, DEFAULT_CUTOFF);
             }
+            contrast(&mut small, contrast_gain);
             let mut canvas = Plane::filled(gw, gh, 0);
             let (ox, oy) = ((gw - fw) / 2, (gh - fh) / 2);
             for y in 0..fh {
@@ -100,7 +104,7 @@ pub fn render(gray: &Plane, p: &Params) -> Rendered {
     match p.frame {
         Some(f) => {
             let (hw, hh) = (f.hole.w, f.hole.h);
-            let photo = photo_levels(gray, &p.fit, hw, hh, p.autocontrast);
+            let photo = photo_levels(gray, &p.fit, hw, hh, p.autocontrast, p.contrast);
             let mut canvas = vec![0u8; f.w * f.h];
             for y in 0..hh {
                 let dst = (f.hole.y + y) * f.w + f.hole.x;
@@ -118,7 +122,7 @@ pub fn render(gray: &Plane, p: &Params) -> Rendered {
             let (ow, oh) = (p.out_w.max(1), p.out_h.max(1));
             let ps = if p.pixel_size == 0 { auto_pixel_size(ow) } else { p.pixel_size };
             let (gw, gh) = (ow.div_ceil(ps), oh.div_ceil(ps));
-            let levels = photo_levels(gray, &p.fit, gw, gh, p.autocontrast);
+            let levels = photo_levels(gray, &p.fit, gw, gh, p.autocontrast, p.contrast);
             Rendered { grid_w: gw, grid_h: gh, levels, scale: ps, out_w: ow, out_h: oh }
         }
     }
@@ -176,6 +180,7 @@ mod tests {
             frame: None,
             frame_scale: 4,
             autocontrast: true,
+            contrast: 1.0,
         };
         let r = render(&g, &p);
         assert_eq!((r.out_w, r.out_h), (800, 350));
@@ -196,6 +201,7 @@ mod tests {
             frame: None,
             frame_scale: 1,
             autocontrast: false,
+            contrast: 1.0,
         };
         let r = render(&g, &p);
         assert_eq!((r.grid_w, r.grid_h), (3, 2));
@@ -214,6 +220,7 @@ mod tests {
             frame: Some(&f),
             frame_scale: 4,
             autocontrast: true,
+            contrast: 1.0,
         };
         let r = render(&g, &p);
         assert_eq!((r.out_w, r.out_h), (640, 576));
@@ -238,12 +245,33 @@ mod tests {
             frame: Some(&f),
             frame_scale: 1,
             autocontrast: true,
+            contrast: 1.0,
         };
         let r = render(&g, &p);
         let pal = by_name("green").unwrap();
         let rgb = r.rgb(&pal);
         let used: std::collections::HashSet<[u8; 3]> = rgb.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
         assert!(used.iter().all(|c| pal.contains(c)));
+    }
+
+    #[test]
+    fn contrast_gain_changes_the_levels() {
+        let g = Plane::filled(40, 40, 96);
+        let mut base = Params {
+            fit: Fit::Cover(BoxF::full(40, 40)),
+            out_w: 40,
+            out_h: 40,
+            pixel_size: 1,
+            frame: None,
+            frame_scale: 1,
+            autocontrast: false,
+            contrast: 1.0,
+        };
+        let flat = render(&g, &base);
+        assert!(flat.levels.contains(&0));
+        assert!(flat.levels.contains(&1));
+        base.contrast = 2.0;
+        assert!(render(&g, &base).levels.iter().all(|&l| l == 0));
     }
 
     #[test]
@@ -257,6 +285,7 @@ mod tests {
             frame: None,
             frame_scale: 1,
             autocontrast: false,
+            contrast: 1.0,
         };
         let r = render(&g, &p);
         assert_eq!(r.levels[0], 0); // top-left is padding

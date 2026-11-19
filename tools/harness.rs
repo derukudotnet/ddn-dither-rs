@@ -61,6 +61,7 @@ fn main() {
                 frame: frame.as_ref(),
                 frame_scale: g("scale", "4").parse().unwrap(),
                 autocontrast: g("ac", "1") == "1",
+                contrast: g("contrast", "1").parse().unwrap(),
             };
             let r = render(&gray, &p);
             write_pgm(&a[2], r.grid_w, r.grid_h, &r.levels);
