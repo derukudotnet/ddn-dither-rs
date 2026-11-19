@@ -71,6 +71,13 @@ fn run_batch(cli: &Cli) -> Result<(), String> {
     let pal = palette::resolve(&cli.palette)?;
     let frame = load_selected_frame(&cli.frame)?;
     if let Some(f) = &frame {
+        if cli.debug {
+            eprintln!(
+                "debug: frame '{}' is {}x{}, window {}x{} at +{},+{}, {}",
+                f.name, f.w, f.h, f.hole.w, f.hole.h, f.hole.x, f.hole.y,
+                if f.hole_is_rect { "plain rectangle" } else { "art overlaps the window (photo shows through only the transparent pixels)" }
+            );
+        }
         if f.source_grey_values > 4 {
             eprintln!("note: frame '{}' used {} grey values; converted to 4 tones", f.name, f.source_grey_values);
         }
