@@ -68,9 +68,11 @@ and the window tells you.
   transparent window converted to a compact `.bin` — no `include_bytes!`, no extra Rust
   function, nothing to register. Two steps:
 
-  1. `tools/genframe.py myframe.png assets/frame_myframe.bin` (needs Pillow; the script
-     reproduces `assets/frame_deruku.bin` from `assets/frame_deruku_4tone.png` byte for byte).
-     The part after `frame_` in the file name is the frame id (`myframe` above).
+  1. `tools/genframe.py myframe.png otherframe.png ...` (needs Pillow; the script writes
+     `assets/frame_<id>.bin` for each, the id from the file stem, a leading `frame_`
+     stripped; it also takes directories, and `-n` previews the names). It reproduces
+     `assets/frame_deruku.bin` from `assets/frame_deruku_4tone.png` byte for byte.
+     The old explicit form `genframe.py myframe.png assets/frame_myframe.bin` still works.
   2. Rebuild. `build.rs` collects every `assets/frame_*.bin` at compile time, so the frame
      appears in the window's frame list and can be selected with `--frame myframe`.
      (`--frame default`/`--frame builtin` keeps meaning the first one in file-name order.)
