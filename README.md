@@ -39,9 +39,12 @@ ddn-dither                                # window, drop an image onto it
 
 * Drop an image anywhere, or **Open image…**. Drag inside the box to move it; drag a handle to
   resize (the opposite corner/side stays fixed, aspect ratio is kept).
-* **Enter** saves. When started from the command line with a file, Enter saves and quits; Esc always closes the window.
-* Size: aspect presets + width/height. With a preset the other dimension follows; choose
-  *Custom* to set both freely. The crop box always has exactly the output's aspect ratio.
+* There is no save-on-Enter shortcut; saving always happens through the **Save** buttons, so an
+  accidental keypress can never silently overwrite a file. When started from the command line
+  with a file, **Save & quit** saves and closes the window; Esc always closes it.
+* Size: aspect presets + width/height (with a swap button). With a preset the other dimension
+  follows; choose *Custom* to set both freely. The crop box always has exactly the output's
+  aspect ratio.
 * **Pixel size** slider = output pixels per dithered pixel (whole numbers → crisp, even blocks).
   *auto* aims for about 384 dithered pixels across.
 * **Contrast** slider boosts or softens contrast around mid-grey, on top of auto contrast (1.00 = no change).

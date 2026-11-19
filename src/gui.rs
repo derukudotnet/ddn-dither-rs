@@ -512,24 +512,20 @@ impl App {
             if !hole_is_rect {
                 ui.colored_label(Color32::from_rgb(200, 140, 0), "Window is not a plain rectangle; the photo fills its bounding box.");
             }
-            ui.horizontal(|ui| {
-                ui.label("Scale");
-                ui.add(egui::DragValue::new(&mut self.frame_scale).range(1..=16).prefix("×"));
-            });
-            let s = self.frame_scale.max(1);
-            ui.label(format!("Output {}×{} px (set by the frame)", fw * s, fh * s));
             ui.add(
                 egui::Slider::new(&mut self.frame_scale, 1..=16)
                     .custom_formatter(|n, _| format!("×{n:.0}"))
                     .text("Scale"),
             )
             .on_hover_text("Integer upscale of the framed image. ×4 makes 640×576 for the built-in frame.");
+            let s = self.frame_scale.max(1);
+            ui.label(format!("Output {}×{} px (set by the frame)", fw * s, fh * s));
         }
         ui.separator();
 
         // ---- size / aspect
         ui.add_enabled_ui(!framed, |ui| {
-            ui.strong("Size");
+            ui.strong("Size & crop");
             let before_idx = self.aspect_idx;
             egui::ComboBox::from_id_salt("aspect")
                 .selected_text(format!("Aspect: {}", ASPECT_PRESETS[self.aspect_idx].0))
@@ -552,6 +548,14 @@ impl App {
                 ui.add(egui::DragValue::new(&mut self.out_w).range(1..=16384));
                 ui.label("H");
                 ui.add(egui::DragValue::new(&mut self.out_h).range(1..=16384));
+                if ui.small_button("⇄").on_hover_text("Swap width and height").clicked() {
+                    std::mem::swap(&mut self.out_w, &mut self.out_h);
+                    let a = self.out_w.max(1) as f64 / self.out_h.max(1) as f64;
+                    self.aspect_idx = ASPECT_PRESETS
+                        .iter()
+                        .position(|(_, p)| *p > 0.0 && (p - a).abs() < 0.002)
+                        .unwrap_or(0);
+                }
             })
             .response
             .on_hover_text("Output size in pixels. With an aspect preset, changing one side adjusts the other.");
@@ -580,24 +584,7 @@ impl App {
             .on_hover_text(
                 "Output pixels per dithered pixel. auto aims for ~384 dithered pixels across; bigger = blockier.",
             );
-            ui.horizontal(|ui| {
-                ui.label("Contrast");
-                ui.add(
-                    egui::Slider::new(&mut self.contrast, 0.25..=4.0)
-                        .custom_formatter(|n, _| format!("{n:.2}"))
-                        .custom_parser(|s| s.trim().parse::<f64>().ok()),
-                );
-                if ui.small_button("Reset").on_hover_text("Back to no extra contrast (1.00)").clicked() {
-                    self.contrast = 1.0;
-                }
-            })
-            .response
-            .on_hover_text("Manual contrast around mid-grey, applied after auto contrast. 1.00 = no change.");
         });
-        ui.checkbox(&mut self.fit_contain, "Fit whole image (pad instead of crop)")
-            .on_hover_text("Scales the whole picture into the output instead of cropping it; the padding uses the darkest tone.");
-        ui.checkbox(&mut self.autocontrast, "Auto contrast")
-            .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
         if ui
             .button(format!("Guides: {}", self.guides.name()))
             .on_hover_text("Guide lines over the crop box to help alignment: rule-of-thirds lines and/or a full-size crosshair through the crop centre.")
@@ -605,6 +592,27 @@ impl App {
         {
             self.guides = self.guides.next();
         }
+        ui.checkbox(&mut self.fit_contain, "Fit whole image (pad instead of crop)")
+            .on_hover_text("Scales the whole picture into the output instead of cropping it; the padding uses the darkest tone.");
+        ui.separator();
+
+        // ---- contrast
+        ui.strong("Contrast");
+        ui.checkbox(&mut self.autocontrast, "Auto contrast")
+            .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
+        ui.horizontal(|ui| {
+            ui.label("Contrast");
+            ui.add(
+                egui::Slider::new(&mut self.contrast, 0.25..=4.0)
+                    .custom_formatter(|n, _| format!("{n:.2}"))
+                    .custom_parser(|s| s.trim().parse::<f64>().ok()),
+            );
+            if ui.small_button("Reset").on_hover_text("Back to no extra contrast (1.00)").clicked() {
+                self.contrast = 1.0;
+            }
+        })
+        .response
+        .on_hover_text("Manual contrast around mid-grey, applied after auto contrast. 1.00 = no change.");
         ui.separator();
 
         // ---- palette
@@ -672,7 +680,7 @@ impl App {
             .on_hover_text("PNG output is 2-bit indexed (a few KB). WebP is lossless full-colour and bigger.");
         let have = self.source.is_some();
         ui.horizontal(|ui| {
-            let label = if self.exit_on_save { "Save & quit  (Enter)" } else { "Save  (Enter)" };
+            let label = if self.exit_on_save { "Save & quit" } else { "Save" };
             if ui
                 .add_enabled(have, egui::Button::new(label))
                 .on_hover_text("Saves to the destination shown below, replacing an earlier file of the same name.")
@@ -876,14 +884,9 @@ impl eframe::App for App {
             self.load(ctx, &p.to_string_lossy());
         }
 
-        // Keyboard: Enter saves, Esc closes the window
-        if !ctx.wants_keyboard_input() {
-            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && self.source.is_some() {
-                self.quick_save(ctx);
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+        // Keyboard: Esc closes the window
+        if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
         egui::SidePanel::right("options").min_width(300.0).default_width(320.0).show(ctx, |ui| {
