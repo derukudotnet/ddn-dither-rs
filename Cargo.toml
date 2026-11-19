@@ -1,0 +1,31 @@
+[package]
+name = "ddn-dither"
+version = "0.2.0"
+edition = "2021"
+description = "Game Boy Camera-style 4-tone Bayer dithering with an interactive crop GUI"
+license = "MIT"
+
+[lib]
+name = "ddn_dither"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ddn-dither"
+path = "src/main.rs"
+
+[features]
+default = ["gui"]
+# `cargo build --release --no-default-features` builds the command-line tool only.
+gui = ["dep:eframe", "dep:rfd"]
+
+[dependencies]
+image = { version = "0.25.6", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+png = "0.17"
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"], optional = true }
+rfd = { version = "0.15", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
