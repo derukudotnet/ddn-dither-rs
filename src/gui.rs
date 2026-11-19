@@ -729,9 +729,10 @@ impl App {
         };
 
         let avail = ui.available_size();
-        let source_h = (avail.y * 0.58).max(160.0);
+        const IMG_PAD: f32 = 14.0;
+        let source_h = (avail.y * 0.58).max(160.0 + 2.0 * IMG_PAD);
         let (resp, painter) = ui.allocate_painter(vec2(avail.x, source_h), Sense::click_and_drag());
-        let area = resp.rect;
+        let area = resp.rect.shrink2(vec2(8.0, IMG_PAD));
         let scale = (area.width() as f64 / iw).min(area.height() as f64 / ih).max(1e-6);
         let img_rect = Rect::from_center_size(area.center(), vec2((iw * scale) as f32, (ih * scale) as f32));
         painter.image(tex_id, img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
