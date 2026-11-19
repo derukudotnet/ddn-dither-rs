@@ -123,6 +123,9 @@ crate API details (pinned: `eframe 0.29`, `image ≥0.25.6`, `png 0.17`, `rfd 0.
 `image` EXIF call `decoder.orientation()` needs 0.25.6 or newer. Everything else
 (`src/lib.rs` and the modules it lists) is plain `std` and does not depend on any crate.
 
+`Cargo.lock` is committed: the executable should build with the exact dependency versions
+it was tested against. (Regenerate deliberately with `cargo update`, not as a side effect.)
+
 ## Layout
 
 ```
