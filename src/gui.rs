@@ -808,23 +808,47 @@ impl App {
             }
         } else {
             ui.label("Four hex colours, darkest first:")
-                .on_hover_text("One box per colour, in the level order of the swatch strip below; 3-digit shorthand like #0f0 works.");
+                .on_hover_text("One box per colour, in the level order of the swatch strip below; clicking a box selects everything in it, so you can paste straight over the old value. 3-digit shorthand like #0f0 works.");
             let mut edited = before_pal != self.pal_idx;
             ui.horizontal_wrapped(|ui| {
-                for text in self.custom_pal.iter_mut() {
+                let gap = ui.spacing().item_spacing.x;
+                let box_w = ((ui.available_width() - 3.0 * gap) / 4.0).max(64.0);
+                for (i, text) in self.custom_pal.iter_mut().enumerate() {
                     let fill = palette::parse_hex(text).ok();
-                    let (rect, _) = ui.allocate_exact_size(vec2(14.0, 17.0), Sense::hover());
                     let c = match fill {
                         Some(c) => Color32::from_rgb(c[0], c[1], c[2]),
                         None => Color32::from_gray(35),
                     };
-                    ui.painter().rect_filled(rect, 2.0, c);
-                    if fill.is_none() {
-                        ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0_f32, Color32::from_rgb(200, 60, 60)));
+                    let lum = |c: &palette::Rgb| 0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32;
+                    let ink = if fill.map(|c| lum(&c) < 100.0).unwrap_or(true) { Color32::WHITE } else { Color32::BLACK };
+                    let stroke = if fill.is_some() { Stroke::NONE } else { Stroke::new(1.0_f32, Color32::from_rgb(200, 60, 60)) };
+                    let id = egui::Id::new(("pal_box", i));
+                    let resp = egui::Frame::none()
+                        .fill(c)
+                        .stroke(stroke)
+                        .rounding(3.0)
+                        .inner_margin(egui::Margin::symmetric(3.0, 2.0))
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(text)
+                                    .id(id)
+                                    .desired_width(box_w - 8.0)
+                                    .font(egui::TextStyle::Monospace)
+                                    .frame(false)
+                                    .text_color(ink),
+                            )
+                        })
+                        .inner;
+                    edited |= resp.changed() || resp.lost_focus();
+                    if resp.gained_focus() {
+                        if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
+                            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(0),
+                                egui::text::CCursor::new(text.chars().count()),
+                            )));
+                            egui::TextEdit::store_state(ui.ctx(), id, st);
+                        }
                     }
-                    edited |= ui
-                        .add(egui::TextEdit::singleline(text).desired_width(66.0).font(egui::TextStyle::Monospace))
-                        .changed();
                 }
             });
             if edited {
