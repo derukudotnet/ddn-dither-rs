@@ -1013,8 +1013,15 @@ impl App {
         // ---- live preview
         ui.separator();
         let pv_bytes = self.preview.as_ref().and_then(|pv| pv.size);
+        let pv_info = self
+            .preview
+            .as_ref()
+            .map(|pv| format!("{0}×{1} px · {2}×{3} grid ×{4}", pv.out.0, pv.out.1, pv.grid.0, pv.grid.1, pv.scale));
         ui.horizontal(|ui| {
             ui.weak("Preview");
+            if let Some(info) = &pv_info {
+                ui.weak(format!("· {info}"));
+            }
             if let Some(b) = pv_bytes {
                 ui.weak(format!("· {}", human_size(b)));
             }
@@ -1043,7 +1050,7 @@ impl App {
         })
         .response
         .on_hover_text(
-            "Zoom the preview: wheel zooms at the pointer, drag pans, double-click returns to Fit. Zoom and pan survive re-renders, so you can compare pixel sizes on the same spot. The header shows the exact size the output file will have.",
+            "Zoom the preview: wheel zooms at the pointer, drag pans, double-click returns to Fit. Zoom and pan survive re-renders, so you can compare pixel sizes on the same spot. The header shows the output resolution, dither grid with the effective pixel size, and the exact size the output file will have.",
         );
         let pv_size = ui.available_size();
         let (pv_rect, pv_resp) = ui.allocate_exact_size(pv_size, Sense::click_and_drag());
