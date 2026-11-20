@@ -984,17 +984,23 @@ impl App {
                     ui.add(egui::Button::new(label))
                 }
             };
+            if toggle(ui, "Crop", self.tool == Tool::Crop)
+                .on_hover_text("Back to moving and resizing the selection rectangle.")
+                .clicked()
+            {
+                self.tool = Tool::Crop;
+            }
             if toggle(ui, "Paint", self.tool == Tool::Paint)
                 .on_hover_text("Paint areas that the Gamma slider below brightens or darkens - for lifting detail out of dark shadows. Mouse wheel over the picture changes the brush size.")
                 .clicked()
             {
-                self.tool = if self.tool == Tool::Paint { Tool::Crop } else { Tool::Paint };
+                self.tool = Tool::Paint;
             }
             if toggle(ui, "Erase", self.tool == Tool::Erase)
                 .on_hover_text("Remove painted areas; the brush size follows the mouse wheel over the picture, too.")
                 .clicked()
             {
-                self.tool = if self.tool == Tool::Erase { Tool::Crop } else { Tool::Erase };
+                self.tool = Tool::Erase;
             }
             if ui
                 .add_enabled(self.mask.is_some(), egui::Button::new("Clear"))
