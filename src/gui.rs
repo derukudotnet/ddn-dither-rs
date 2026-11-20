@@ -761,14 +761,6 @@ impl App {
             };
             ui.weak(format!("→ {}", file_name(&dest)));
         }
-        ui.add_space(4.0);
-        if ui
-            .small_button("Reset all settings")
-            .on_hover_text("Return every option to its startup value: size, pixel size, contrast, frame selection and scale, palette, crop box.")
-            .clicked()
-        {
-            self.reset_settings();
-        }
         ui.separator();
         ui.label(&self.status);
         ui.add_space(6.0);
@@ -778,6 +770,16 @@ impl App {
             "Drag inside the box to move it; drag a handle to resize (opposite side stays put). Drop another image anywhere to switch. Esc closes."
         };
         ui.weak(hint);
+        ui.add_space(10.0);
+        ui.vertical_centered_justified(|ui| {
+            if ui
+                .small_button("Reset all settings")
+                .on_hover_text("Return every option to its startup value: size, pixel size, contrast, frame selection and scale, palette, crop box.")
+                .clicked()
+            {
+                self.reset_settings();
+            }
+        });
     }
 
     fn main_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
