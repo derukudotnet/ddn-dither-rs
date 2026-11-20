@@ -12,6 +12,7 @@ use ddn_dither::cli::{self, Cli, CropMode, Format, FrameSel};
 use ddn_dither::cropbox::{CropBox, Handle};
 use ddn_dither::frame::Frame;
 use ddn_dither::gray::Plane;
+use ddn_dither::mask;
 use ddn_dither::palette::{self, Palette};
 use ddn_dither::pipeline::{self, Fit, Params, Rendered};
 use ddn_dither::resample::{resize_plane, resize_rgb, BoxF};
@@ -22,6 +23,18 @@ use crate::io;
 const PROXY_MAX: usize = 1200;
 /// Longest side of the texture used to show the source photo.
 const DISPLAY_MAX: usize = 2048;
+/// Brush gamma that fresh paint starts with (brightens, the common touch-up case).
+const BRUSH_GAMMA_DEFAULT: f64 = 0.5;
+/// Longest side of the tint texture used to show painted areas.
+const MASK_TINT_MAX: usize = 512;
+
+/// What the pointer does over the source photo.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tool {
+    Crop,
+    Paint,
+    Erase,
+}
 
 /// Overlay lines drawn on top of the crop box to help alignment.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,6 +102,8 @@ struct RenderKey {
     autocontrast: bool,
     gamma: f64,
     fit: usize,
+    mask_gamma: f64,
+    mask_version: u64,
     proxy: bool,
     source_id: u64,
 }
@@ -127,6 +142,21 @@ struct App {
     snap_pixels: bool,
     guides: Guides,
     format: Format,
+
+    tool: Tool,
+    /// Brush radius in source pixels; wheel over the photo changes it.
+    brush_r: f64,
+    /// Painted coverage at source resolution; `None` until the first dab.
+    mask: Option<Plane>,
+    /// Bumped on every mutation of `mask` so the preview re-renders.
+    mask_version: u64,
+    /// Proxy-resolution copy of the mask, kept for fast renders while dragging/stroking.
+    mask_view: Option<(Plane, u64)>,
+    mask_gamma: f64,
+    /// Translucent tint texture showing painted areas, rebuilt when not stroking.
+    mask_tex: Option<(TextureHandle, u64)>,
+    /// Last dabbed position of the current stroke, for interpolating fast pointer moves.
+    stroke: Option<(f64, f64)>,
 
     frames: Vec<Frame>,
     frame_idx: Option<usize>,
@@ -244,6 +274,14 @@ impl App {
             gamma_wheel_acc: 0.0,
             snap_pixels: false,
             guides: Guides::Thirds,
+            tool: Tool::Crop,
+            brush_r: 24.0,
+            mask: None,
+            mask_version: 0,
+            mask_view: None,
+            mask_gamma: BRUSH_GAMMA_DEFAULT,
+            mask_tex: None,
+            stroke: None,
             format: cli.format,
             frames,
             frame_idx,
@@ -335,6 +373,12 @@ impl App {
         self.crop = CropBox::max_fit(w as f64, h as f64, self.aspect());
         self.last_aspect = self.aspect();
         self.drag = None;
+        self.stroke = None;
+        self.mask = None;
+        self.mask_version += 1;
+        self.mask_view = None;
+        self.mask_tex = None;
+        self.brush_r = (w.min(h) as f64 / 12.0).max(4.0);
         self.last_key = None;
         self.status = format!("Loaded {path} ({w}x{h})");
     }
@@ -350,7 +394,7 @@ impl App {
         }
     }
 
-    fn params<'a>(&'a self, crop: BoxF) -> Params<'a> {
+    fn params<'a>(&'a self, crop: BoxF, mask: Option<&'a Plane>) -> Params<'a> {
         Params {
             fit: match self.fit_mode {
                 1 => Fit::Contain,
@@ -364,9 +408,65 @@ impl App {
             frame_scale: self.frame_scale,
             autocontrast: self.autocontrast,
             gamma: self.gamma,
-            mask: None,
-            mask_gamma: 1.0,
+            mask,
+            mask_gamma: self.mask_gamma,
         }
+    }
+
+    /// Paint or erase one brush dab in source coordinates.
+    fn dab_at(&mut self, x: f64, y: f64) {
+        let Some(src) = self.source.as_ref() else { return };
+        let (w, h) = (src.w, src.h);
+        let m = self.mask.get_or_insert_with(|| Plane::new(w, h, vec![0; w * h]));
+        match self.tool {
+            Tool::Paint => mask::dab(m, x, y, self.brush_r),
+            Tool::Erase => mask::erase(m, x, y, self.brush_r),
+            Tool::Crop => {}
+        }
+        self.mask_version += 1;
+    }
+
+    /// Keep the proxy-resolution mask copy in step while fast (drag/stroke) renders run.
+    fn sync_mask_view(&mut self, use_proxy: bool) {
+        if !use_proxy {
+            return;
+        }
+        let (pw, ph) = match self.source.as_ref().and_then(|s| s.proxy.as_ref()) {
+            Some((plane, _, _)) => (plane.w, plane.h),
+            None => return,
+        };
+        match &self.mask {
+            Some(m) => {
+                if self.mask_view.as_ref().map(|(_, v)| *v) != Some(self.mask_version) {
+                    self.mask_view = Some((decimate_plane(m, pw, ph), self.mask_version));
+                }
+            }
+            None => self.mask_view = None,
+        }
+    }
+
+    /// Rebuild the painted-area tint; skipped while a stroke is in progress so painting stays cheap.
+    fn sync_mask_tex(&mut self, ctx: &egui::Context) {
+        let Some(m) = &self.mask else {
+            self.mask_tex = None;
+            return;
+        };
+        if self.stroke.is_some() || self.mask_tex.as_ref().map(|(_, v)| *v) == Some(self.mask_version) {
+            return;
+        }
+        let s = MASK_TINT_MAX.min(m.w.max(m.h)) as f64 / m.w.max(m.h) as f64;
+        let (dw, dh) = (((m.w as f64 * s).round() as usize).max(1), ((m.h as f64 * s).round() as usize).max(1));
+        let small = decimate_plane(m, dw, dh);
+        let mut rgba = Vec::with_capacity(dw * dh * 4);
+        for &c in &small.data {
+            rgba.extend_from_slice(&[255, 214, 120, (c as f32 * 0.45) as u8]);
+        }
+        let tex = ctx.load_texture(
+            "touchup",
+            egui::ColorImage::from_rgba_unmultiplied([dw, dh], &rgba),
+            TextureOptions::LINEAR,
+        );
+        self.mask_tex = Some((tex, self.mask_version));
     }
 
     /// Render from the proxy (fast, while dragging) or the full-resolution photo.
@@ -376,9 +476,10 @@ impl App {
         match (&src.proxy, use_proxy) {
             (Some((plane, sx, sy)), true) => {
                 let pb = BoxF { x0: b.x0 * sx, y0: b.y0 * sy, x1: b.x1 * sx, y1: b.y1 * sy };
-                Some(pipeline::render(plane, &self.params(pb)))
+                let mask = self.mask_view.as_ref().map(|(m, _)| m);
+                Some(pipeline::render(plane, &self.params(pb, mask)))
             }
-            _ => Some(pipeline::render(&src.gray, &self.params(b))),
+            _ => Some(pipeline::render(&src.gray, &self.params(b, self.mask.as_ref()))),
         }
     }
 
@@ -391,6 +492,8 @@ impl App {
             scale: self.frame_scale,
             autocontrast: self.autocontrast,
             gamma: self.gamma,
+            mask_gamma: self.mask_gamma,
+            mask_version: self.mask_version,
             fit: self.fit_mode,
             proxy: use_proxy,
             source_id: self.source_id,
@@ -401,7 +504,8 @@ impl App {
         if self.source.is_none() {
             return;
         }
-        let use_proxy = self.drag.is_some();
+        let use_proxy = self.drag.is_some() || self.stroke.is_some();
+        self.sync_mask_view(use_proxy);
         let key = self.render_key(use_proxy);
         if self.last_key.as_ref() == Some(&key) {
             if let Some(pv) = &mut self.preview {
@@ -458,7 +562,7 @@ impl App {
 
     fn save_to(&mut self, path: &str) -> bool {
         let Some(src) = self.source.as_ref() else { return false };
-        let r = pipeline::render(&src.gray, &self.params(self.crop.to_box()));
+        let r = pipeline::render(&src.gray, &self.params(self.crop.to_box(), self.mask.as_ref()));
         match io::save(path, &r, &self.palette) {
             Ok(()) => {
                 self.status = format!("Saved {path} ({}x{})", r.out_w, r.out_h);
@@ -523,6 +627,12 @@ impl App {
         self.frame_scale = self.cli.scale;
         self.format = self.cli.format;
         self.guides = Guides::Thirds;
+        self.tool = Tool::Crop;
+        self.mask_gamma = BRUSH_GAMMA_DEFAULT;
+        self.stroke = None;
+        if self.mask.take().is_some() {
+            self.mask_version += 1;
+        }
         if let Some(src) = &self.source {
             let (ow, oh) = cli::resolve_size(&self.cli, src.w, src.h);
             self.out_w = ow;
@@ -853,6 +963,61 @@ impl App {
         });
         ui.separator();
 
+        // ---- touch-up
+        ui.strong("Touch-up");
+        ui.horizontal(|ui| {
+            let toggle = |ui: &mut egui::Ui, label: &str, on: bool| {
+                if on {
+                    ui.add(egui::Button::new(label).fill(ui.visuals().selection.bg_fill))
+                } else {
+                    ui.add(egui::Button::new(label))
+                }
+            };
+            if toggle(ui, "Paint", self.tool == Tool::Paint)
+                .on_hover_text("Paint areas that the Gamma slider below brightens or darkens - for lifting detail out of dark shadows. Mouse wheel over the picture changes the brush size.")
+                .clicked()
+            {
+                self.tool = if self.tool == Tool::Paint { Tool::Crop } else { Tool::Paint };
+            }
+            if toggle(ui, "Erase", self.tool == Tool::Erase)
+                .on_hover_text("Remove painted areas; the brush size follows the mouse wheel over the picture, too.")
+                .clicked()
+            {
+                self.tool = if self.tool == Tool::Erase { Tool::Crop } else { Tool::Erase };
+            }
+            if ui
+                .add_enabled(self.mask.is_some(), egui::Button::new("Clear"))
+                .on_hover_text("Remove all painted areas.")
+                .clicked()
+            {
+                self.mask = None;
+                self.mask_version += 1;
+            }
+        });
+        if self.tool != Tool::Crop {
+            ui.horizontal(|ui| {
+                ui.label("Gamma");
+                ui.add(
+                    egui::Slider::new(&mut self.mask_gamma, 0.25..=4.0)
+                        .step_by(0.05)
+                        .custom_formatter(|n, _| format!("{n:.2}"))
+                        .custom_parser(|s| s.trim().parse::<f64>().ok()),
+                );
+                if ui.small_button("Reset").on_hover_text("Back to the starting strength").clicked() {
+                    self.mask_gamma = BRUSH_GAMMA_DEFAULT;
+                }
+            })
+            .response
+            .on_hover_text("Curve applied where you painted, before the contrast stretch. Below 1.00 brightens, above 1.00 darkens. Drag or scroll over the picture while a tool is active.");
+            ui.weak(format!(
+                "Brush {} px on a {}x{} picture - mouse wheel changes it",
+                self.brush_r.round() as i64,
+                self.source.as_ref().map(|s| s.w).unwrap_or(0),
+                self.source.as_ref().map(|s| s.h).unwrap_or(0)
+            ));
+        }
+        ui.separator();
+
         // ---- contrast
         ui.strong("Contrast");
         ui.checkbox(&mut self.autocontrast, "Auto")
@@ -1109,13 +1274,47 @@ impl App {
         let to_img = |p: egui::Pos2| ((p.x - img_rect.min.x) as f64 / scale, (p.y - img_rect.min.y) as f64 / scale);
         let to_screen = |x: f64, y: f64| pos2(img_rect.min.x + (x * scale) as f32, img_rect.min.y + (y * scale) as f32);
 
+        let brushing = self.tool != Tool::Crop;
+        if brushing {
+            if resp.hovered() {
+                let dz = ctx.input(|i| i.raw_scroll_delta.y);
+                if dz != 0.0 {
+                    self.brush_r = (self.brush_r * (dz as f64 / 160.0).exp()).clamp(4.0, iw.min(ih) / 2.0);
+                }
+            }
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let (px, py) = to_img(pos);
+                let (ix, iy) = (px.clamp(0.0, iw), py.clamp(0.0, ih));
+                if resp.drag_started() {
+                    self.stroke = Some((ix, iy));
+                    self.dab_at(ix, iy);
+                } else if resp.dragged() {
+                    if let Some((lx, ly)) = self.stroke {
+                        let step = (self.brush_r / 4.0).max(1.0);
+                        let dist = (ix - lx).hypot(iy - ly);
+                        if dist > 0.0 {
+                            let n = ((dist / step).floor() as usize).max(1);
+                            for k in 1..=n {
+                                let t = k as f64 / n as f64;
+                                self.dab_at(lx + (ix - lx) * t, ly + (iy - ly) * t);
+                            }
+                        }
+                    }
+                    self.stroke = Some((ix, iy));
+                }
+                if resp.drag_stopped() {
+                    self.stroke = None;
+                }
+            }
+        }
+
         if self.fit_mode == 0 {
             // ---- interaction
             let tol = 10.0 / scale;
             let aspect = self.aspect();
             let min_w = 24.0_f64.min(iw / 4.0);
 
-            if self.drag.is_none() {
+            if self.drag.is_none() && !brushing {
                 if let Some(pos) = resp.hover_pos() {
                     let (ix, iy) = to_img(pos);
                     if let Some(h) = self.crop.hit(ix, iy, tol) {
@@ -1127,7 +1326,7 @@ impl App {
                     }
                 }
             }
-            if resp.drag_started() {
+            if !brushing && resp.drag_started() {
                 if let Some(pos) = resp.interact_pointer_pos() {
                     let (ix, iy) = to_img(pos);
                     if let Some(h) = self.crop.hit(ix, iy, tol) {
@@ -1135,14 +1334,14 @@ impl App {
                     }
                 }
             }
-            if resp.dragged() {
+            if !brushing && resp.dragged() {
                 if let (Some(d), Some(pos)) = (self.drag.as_ref(), resp.interact_pointer_pos()) {
                     ctx.set_cursor_icon(cursor_for(d.handle, true));
                     let (ix, iy) = to_img(pos);
                     self.crop = CropBox::drag(&d.start, d.handle, d.ptr, (ix, iy), aspect, iw, ih, min_w);
                 }
             }
-            if resp.drag_stopped() {
+            if !brushing && resp.drag_stopped() {
                 self.drag = None;
             }
 
@@ -1202,6 +1401,16 @@ impl App {
                 egui::FontId::proportional(13.0),
                 Color32::WHITE,
             );
+        }
+        self.sync_mask_tex(ctx);
+        if let Some((mtex, _)) = &self.mask_tex {
+            painter.image(mtex.id(), img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        if brushing {
+            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|p| img_rect.contains(*p)) {
+                let (ix, iy) = to_img(pos);
+                painter.circle_stroke(to_screen(ix, iy), (self.brush_r * scale) as f32, Stroke::new(1.5_f32, Color32::WHITE));
+            }
         }
         if hovering {
             painter.rect_filled(area, 0.0, Color32::from_black_alpha(160));
@@ -1323,6 +1532,19 @@ impl App {
     }
 }
 
+/// Nearest-neighbour shrink of a coverage plane, precise enough for tint and proxy use.
+fn decimate_plane(m: &Plane, w: usize, h: usize) -> Plane {
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let sy = (y * m.h / h).min(m.h - 1);
+        for x in 0..w {
+            let sx = (x * m.w / w).min(m.w - 1);
+            out.push(m.data[sy * m.w + sx]);
+        }
+    }
+    Plane::new(w, h, out)
+}
+
 fn cursor_for(h: Handle, dragging: bool) -> egui::CursorIcon {
     use egui::CursorIcon as C;
     match h {
@@ -1429,7 +1651,7 @@ impl eframe::App for App {
                 self.open_dialog(ctx);
             } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
                 self.quick_save(ctx);
-            } else if self.fit_mode == 0 && self.drag.is_none() {
+            } else if self.fit_mode == 0 && self.drag.is_none() && self.tool == Tool::Crop {
                 let (dl, dr, du, dd) = ctx.input(|i| {
                     (
                         i.key_pressed(egui::Key::ArrowLeft),
@@ -1537,6 +1759,54 @@ mod interaction {
         }
         assert_eq!(app.crop, before, "idle frames changed the crop box");
         assert!(ctx.fonts(|f| f.has_glyphs(&egui::FontId::proportional(14.0), "⇄→✓")), "symbol fallback font missing glyphs");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn painting_builds_a_mask_that_the_preview_follows() {
+        let (w, h) = (200u32, 120u32);
+        let mut data = Vec::with_capacity((w * h * 3) as usize);
+        for _ in 0..h {
+            for x in 0..w {
+                data.push((x % 256) as u8);
+                data.push(64);
+                data.push(96);
+            }
+        }
+        let path = std::env::temp_dir().join("ddn_dither_mask_regression.png");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut enc = png::Encoder::new(file, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&data).unwrap();
+
+        let ctx = egui::Context::default();
+        let cli = cli::parse(&["ddn-dither".to_string()]).unwrap();
+        let mut app = App::build(&ctx, cli);
+        app.load(&ctx, path.to_str().unwrap());
+
+        app.tool = Tool::Paint;
+        app.dab_at(100.0, 60.0);
+        let v1 = app.mask_version;
+        let m = app.mask.as_ref().expect("first dab creates the mask");
+        assert_eq!(m.w, w as usize, "mask matches the source size");
+        assert_eq!(m.data[60 * w as usize + 100], 255);
+        app.dab_at(100.0, 60.0);
+        assert!(app.mask_version > v1, "each dab invalidates the preview");
+
+        app.tool = Tool::Erase;
+        let before = app.mask.as_ref().unwrap().data.clone();
+        app.dab_at(100.0, 60.0);
+        let after = app.mask.as_ref().unwrap();
+        assert!(after.data[60 * w as usize + 100] < before[60 * w as usize + 100]);
+
+        let key = app.render_key(false);
+        assert!(!key.proxy);
+        assert_eq!(key.mask_version, app.mask_version);
+
+        app.tool = Tool::Crop;
+        app.reset_settings();
+        assert!(app.mask.is_none(), "reset clears the mask");
         let _ = std::fs::remove_file(&path);
     }
 }
