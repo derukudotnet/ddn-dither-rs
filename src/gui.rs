@@ -676,33 +676,13 @@ impl App {
                     self.out_w = ((self.out_h as f64 * a).round() as usize).max(1);
                 }
             }
-            ui.horizontal(|ui| {
-                ui.label("Pixel size");
-                ui.add(
-                    egui::Slider::new(&mut self.pixel_size, 0..=32)
-                        .custom_formatter(|n, _| if n == 0.0 { "auto".to_string() } else { format!("{n:.0}") })
-                        .custom_parser(|s| {
-                            if s.trim().eq_ignore_ascii_case("auto") { Some(0.0) } else { s.trim().parse::<f64>().ok() }
-                        }),
-                );
-                let ps = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
-                if self.pixel_size == 0 {
-                    ui.weak(format!("→ {ps}"));
-                }
-                ui.weak(format!("{}×{} grid", self.out_w.div_ceil(ps), self.out_h.div_ceil(ps)));
-                let (cw, ch) = (self.out_w % ps, self.out_h % ps);
-                if cw != 0 || ch != 0 {
-                    ui.weak(format!("(crops {cw}×{ch} px)"));
-                }
-            })
-            .response
-            .on_hover_text(
-                "Output pixels per dithered pixel; the readout shows the resulting grid size (pixels across = grid width) and whether any row/column of the output would be cropped. The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
-            );
             if self.snap_pixels {
                 let eff = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
                 ui.horizontal_wrapped(|ui| {
-                    ui.weak("Exact:");
+                    ui.label("Pixel size");
+                    if ui.selectable_label(self.pixel_size == 0, "auto").clicked() {
+                        self.pixel_size = 0;
+                    }
                     for cand in 1..=32 {
                         if self.out_w.is_multiple_of(cand) && self.out_h.is_multiple_of(cand) {
                             let selected = self.pixel_size == cand;
@@ -712,13 +692,40 @@ impl App {
                             }
                         }
                     }
+                    ui.weak(format!("{gw}×{gh} grid", gw = self.out_w.div_ceil(eff), gh = self.out_h.div_ceil(eff)));
                 })
                 .response
-                .on_hover_text("Every pixel size that divides the output exactly, so each dither block stays a whole, uncropped N×N; the check mark marks the effective one (auto falls back to it too). Click one to set it — slider drags snap to these as well while Integer scale is on.");
+                .on_hover_text(
+                    "Output pixels per dithered pixel; Integer scale keeps only the sizes that divide the output exactly, so every dither block stays a whole, uncropped N×N and the check mark marks the effective one (auto falls back to it). The readout shows the resulting grid size (pixels across = grid width). The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Pixel size");
+                    ui.add(
+                        egui::Slider::new(&mut self.pixel_size, 0..=32)
+                            .custom_formatter(|n, _| if n == 0.0 { "auto".to_string() } else { format!("{n:.0}") })
+                            .custom_parser(|s| {
+                                if s.trim().eq_ignore_ascii_case("auto") { Some(0.0) } else { s.trim().parse::<f64>().ok() }
+                            }),
+                    );
+                    let ps = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
+                    if self.pixel_size == 0 {
+                        ui.weak(format!("→ {ps}"));
+                    }
+                    ui.weak(format!("{gw}×{gh} grid", gw = self.out_w.div_ceil(ps), gh = self.out_h.div_ceil(ps)));
+                    let (cw, ch) = (self.out_w % ps, self.out_h % ps);
+                    if cw != 0 || ch != 0 {
+                        ui.weak(format!("(crops {cw}×{ch} px)"));
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Output pixels per dithered pixel; the readout shows the resulting grid size (pixels across = grid width) and whether any row/column of the output would be cropped. The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
+                );
             }
             ui.checkbox(&mut self.snap_pixels, "Integer scale")
                 .on_hover_text(
-                    "Keeps every dither block a whole, uncropped N×N without changing your output size: the pixel size snaps to the nearest value that divides width and height exactly (for 800×350 that is 1, 2, 5, 10, 25, 50…). With the pixel size on auto it only kicks in when the automatic value does not divide the output.",
+                    "Replaces the pixel-size slider while it is on: only sizes that divide your output exactly are offered, so every dither block stays a whole, uncropped N×N and the output size is never changed (turning it off brings the free slider back).",
                 )
                 .changed();
             if self.snap_pixels
