@@ -699,6 +699,23 @@ impl App {
             .on_hover_text(
                 "Output pixels per dithered pixel; the readout shows the resulting grid size (pixels across = grid width) and whether any row/column of the output would be cropped. The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
             );
+            if self.snap_pixels {
+                let eff = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak("Exact:");
+                    for cand in 1..=32 {
+                        if self.out_w.is_multiple_of(cand) && self.out_h.is_multiple_of(cand) {
+                            let selected = self.pixel_size == cand;
+                            let text = if eff == cand { format!("{cand} ✓") } else { cand.to_string() };
+                            if ui.selectable_label(selected, text).clicked() {
+                                self.pixel_size = cand;
+                            }
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Every pixel size that divides the output exactly, so each dither block stays a whole, uncropped N×N; the check mark marks the effective one (auto falls back to it too). Click one to set it — slider drags snap to these as well while Integer scale is on.");
+            }
             ui.checkbox(&mut self.snap_pixels, "Integer scale")
                 .on_hover_text(
                     "Keeps every dither block a whole, uncropped N×N without changing your output size: the pixel size snaps to the nearest value that divides width and height exactly (for 800×350 that is 1, 2, 5, 10, 25, 50…). With the pixel size on auto it only kicks in when the automatic value does not divide the output.",
