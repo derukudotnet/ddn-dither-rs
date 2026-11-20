@@ -794,6 +794,45 @@ impl App {
         })
         .response
         .on_hover_text("How the picture fills the output. Crop: centre-crop to the output aspect. Pad: scale the whole picture in and fill the rest with the darkest tone. Edge pad: fill the rest by repeating the picture's outermost rows and columns, so the image looks smeared out to the edges.");
+        if !framed && self.fit_mode == 0 {
+            if let Some((iw, ih)) = self.source.as_ref().map(|s| (s.w as f64, s.h as f64)) {
+                let c = self.crop;
+                let (mut x, mut y, mut w, mut h) = (c.x * iw, c.y * ih, c.w * iw, c.h * ih);
+                let (bx, by, bw, bh) = (x, y, w, h);
+                ui.horizontal(|ui| {
+                    ui.label("X");
+                    ui.add(egui::DragValue::new(&mut x).speed(0.5).range(0.0..=iw).suffix(" px"));
+                    ui.label("Y");
+                    ui.add(egui::DragValue::new(&mut y).speed(0.5).range(0.0..=ih).suffix(" px"));
+                });
+                if (x, y) != (bx, by) {
+                    self.crop = CropBox { x: (x / iw).max(0.0), y: (y / ih).max(0.0), w: c.w, h: c.h }.clamped_position(iw, ih);
+                }
+                ui.horizontal(|ui| {
+                    ui.label("W");
+                    ui.add(egui::DragValue::new(&mut w).speed(0.5).range(1.0..=iw).suffix(" px"));
+                    ui.label("H");
+                    ui.add(egui::DragValue::new(&mut h).speed(0.5).range(1.0..=ih).suffix(" px"));
+                })
+                .response
+                .on_hover_text("Exact crop position and size in source pixels. They follow the box while you drag it; typing or dragging a number moves the box. W or H snaps to the aspect ratio (the one you edit wins), values clamp to the picture. Hold Shift with the arrow keys to nudge by 10.");
+                if (w, h) != (bw, bh) {
+                    let min_w = 24.0_f64.min(iw / 4.0);
+                    let aspect = self.aspect();
+                    let mut wp = w.round().clamp(min_w, iw);
+                    if h != bh && w == bw {
+                        wp = (h.round().clamp(1.0, ih) * aspect).round().clamp(min_w, iw);
+                    }
+                    let mut hp = (wp / aspect).round();
+                    if hp > ih {
+                        hp = ih;
+                        wp = (hp * aspect).round().clamp(min_w, iw);
+                        hp = (wp / aspect).round().min(ih);
+                    }
+                    self.crop = CropBox { x: c.x, y: c.y, w: wp / iw, h: hp / ih }.clamped_position(iw, ih);
+                }
+            }
+        }
         ui.separator();
 
         // ---- contrast
