@@ -1332,9 +1332,41 @@ impl eframe::App for App {
             self.load(ctx, &p.to_string_lossy());
         }
 
-        // Keyboard: Esc closes the window
+        // Keyboard: Esc closes the window; Ctrl+O open, Ctrl+S save, arrows nudge the crop
         if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if !ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::O)) {
+                self.open_dialog(ctx);
+            } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
+                self.quick_save(ctx);
+            } else if self.fit_mode == 0 && self.drag.is_none() {
+                let (dl, dr, du, dd) = ctx.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::ArrowLeft),
+                        i.key_pressed(egui::Key::ArrowRight),
+                        i.key_pressed(egui::Key::ArrowUp),
+                        i.key_pressed(egui::Key::ArrowDown),
+                    )
+                });
+                let step = if ctx.input(|i| i.modifiers.shift) { 10.0 } else { 1.0 };
+                let (dx, dy) = ((dr as i32 - dl as i32) as f64 * step, (dd as i32 - du as i32) as f64 * step);
+                if (dx != 0.0 || dy != 0.0) && self.source.is_some() {
+                    let (iw, ih) = self.source.as_ref().map(|s| (s.w as f64, s.h as f64)).unwrap();
+                    let c = self.crop;
+                    self.crop = CropBox::drag(
+                        &c,
+                        Handle::Move,
+                        (c.x, c.y),
+                        (c.x + dx, c.y + dy),
+                        self.aspect(),
+                        iw,
+                        ih,
+                        24.0_f64.min(iw / 4.0),
+                    );
+                }
+            }
         }
 
         egui::SidePanel::right("options")

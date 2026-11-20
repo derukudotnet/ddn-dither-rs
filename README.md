@@ -73,6 +73,8 @@ ddn-dither                                # window, drop an image onto it
   command uses the default centre-crop.
 * **Contrast** slider boosts or softens contrast around mid-grey, on top of auto contrast (1.00 = no change).
 * **Guides** over the crop box: rule-of-thirds lines or a crosshair through the crop centre, to help alignment.
+* **Keyboard**: arrow keys nudge the crop box by one source pixel (Shift = 10), Ctrl+S saves,
+  Ctrl+O opens an image, Esc closes the window.
 * **Fit** chooses how the picture fills the output: **Crop** centre-crops, **Pad** scales the
   whole picture in and fills the rest with the darkest tone, **Edge pad** fills the rest by
   repeating the picture's outermost rows and columns (a smeared-out extension of the image
