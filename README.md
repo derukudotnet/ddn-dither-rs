@@ -32,21 +32,46 @@ ddn-dither                                # window, drop an image onto it
 ```
 
 `ddn-dither --help` lists everything. Your old options keep working
-(`--output-size`, `--output-width`, `--aspect`, `--crop-mode cover|contain|interactive`,
+(`--output-size`, `--output-width`, `--aspect`, `--crop-mode cover|contain|pad|interactive`,
 `--format`, `--output`); `-s/--internal-scale` is accepted and ignored.
 
 ### Window
 
 * Drop an image anywhere, or **Open image…**. Drag inside the box to move it; drag a handle to
   resize (the opposite corner/side stays fixed, aspect ratio is kept).
-* **Enter** saves. When started from the command line with a file, Enter saves and quits; Esc always closes the window.
-* Size: aspect presets + width/height. With a preset the other dimension follows; choose
-  *Custom* to set both freely. The crop box always has exactly the output's aspect ratio.
+* There is no save-on-Enter shortcut; saving always happens through the **Save** buttons, so an
+  accidental keypress can never silently overwrite a file. When started from the command line
+  with a file, **Save & quit** saves and closes the window; Esc always closes it.
+* Size: aspect presets + width/height (with a swap button). With a preset the other dimension
+  follows; choose *Custom* to set both freely. The crop box always has exactly the output's
+  aspect ratio.
+* **Integer scale** (Size & crop) keeps the dither blocks whole and uncropped *without
+  changing your output size*: while it is on, the pixel-size slider is replaced by one-click
+  choices for exactly the values that divide width and height (800×350, for instance, allows
+  1, 2, 5, 10, 25, 50, plus *auto*); the effective one is marked. Turning it off brings the
+  free slider back, letting any pixel size be used with a partial row/column cut off (the
+  pixel-size row warns).
 * **Pixel size** slider = output pixels per dithered pixel (whole numbers → crisp, even blocks).
-  *auto* aims for about 384 dithered pixels across.
+  *auto* aims for about 384 dithered pixels across; the row shows the resulting grid size if you
+  want to match the Camera's authentic 128×112 photo grid.
+* **Preview zoom**: Fit / 100% buttons above the preview, with the current zoom shown next to
+  them (in Fit mode you see the effective scale, e.g. `Fit · 87%`). Mouse wheel zooms at the
+  pointer, dragging pans (grab cursor), double-click returns to Fit. Zoom and pan survive
+  re-renders, so you can change pixel size and compare on exactly the same spot. At 100% the
+  preview is pixel-for-pixel what the saved file contains — no need to save-and-check to judge
+  the result. The header also shows the exact size of the output file for the current
+  format (computed with the same encoder settings as saving, so it is the real number). The
+  header also shows the output resolution and the dither grid with the effective pixel size
+  (e.g. `800×350 px · 400×175 grid · ×2`), so you can read the result without scanning the sidebar.
+* **Reset all settings** (bottom of the sidebar) returns every option to its startup value —
+  size, pixel size, contrast, frame selection and scale, palette, and the crop box — as if the
+  app were restarted with the same image, without closing it.
 * **Contrast** slider boosts or softens contrast around mid-grey, on top of auto contrast (1.00 = no change).
 * **Guides** over the crop box: rule-of-thirds lines or a crosshair through the crop centre, to help alignment.
-* **Fit whole image** pads instead of cropping (padding uses the darkest tone).
+* **Fit** chooses how the picture fills the output: **Crop** centre-crops, **Pad** scales the
+  whole picture in and fills the rest with the darkest tone, **Edge pad** fills the rest by
+  repeating the picture's outermost rows and columns (a smeared-out extension of the image
+  border; sometimes it hides dithering seams better than dark padding).
 * Palette: ddn, green, bw, pocket, color, or your own four hex colours (darkest first; 3-digit shorthand like `#0f0` works).
 * Switching palette or recolouring happens instantly — the dithered grid is cached and only recoloured.
 * Every control has a tooltip; hover (or long-press) it for details.
@@ -60,7 +85,9 @@ ddn-dither                                # window, drop an image onto it
 A frame is a PNG with a transparent rectangular window. Like the real Game Boy Camera's frames
 it uses **four grey levels**; the palette then recolours frame and photo together. A frame that
 has more greys is converted to four tones on load (with the same thresholds as the dither step)
-and the window tells you.
+and the window tells you. Frame names are shown prettified in the dropdown (`film_roll`
+becomes "Film Roll"); frame ids stay as-is for `--frame`. The dropdown groups frames by
+size: 160×144 (Game Boy Camera), 160×224 (wild), everything else under "Other sizes".
 
 * Built in: the Deruku frame (160×144, 128×112 window).
 
@@ -73,9 +100,15 @@ and the window tells you.
      stripped; it also takes directories, and `-n` previews the names). It reproduces
      `assets/frame_deruku.bin` from `assets/frame_deruku_4tone.png` byte for byte.
      The old explicit form `genframe.py myframe.png assets/frame_myframe.bin` still works.
-  2. Rebuild. `build.rs` collects every `assets/frame_*.bin` at compile time, so the frame
-     appears in the window's frame list and can be selected with `--frame myframe`.
+  2. Rebuild. `build.rs` collects every `assets/frame_*.bin` at compile time (top level and
+     one subfolder level), so the frame appears in the window's frame list and can be
+     selected with `--frame myframe`.
      (`--frame default`/`--frame builtin` keeps meaning the first one in file-name order.)
+
+  **The frame dropdown is grouped by folder.** Top-level `assets/frame_*.bin` files form the
+  *Built-in* section; frames in `assets/<sub>/` (e.g. `assets/wild/`) form one section per
+  folder; runtime frames in `frames/` likewise, with top-level `frames/*.png` under
+  *Custom*. Sections appear as Built-in, then folders alphabetically, then Custom.
 
   If you skip step 1 you don't even need a rebuild: drop the plain PNG in a `frames/`
   folder (next to the executable, or in `~/.config/ddn-dither/frames/`) and the window

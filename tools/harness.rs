@@ -1,6 +1,6 @@
 // Verification harness (std + ddn_dither only). Reads/writes binary PNM so Python can compare.
 //   harness resize IN.pgm DW DH X0 Y0 X1 Y1 OUT.pgm
-//   harness render IN.ppm OUT.pgm out_w=800 out_h=350 ps=0 frame=none|builtin scale=4 ac=1 fit=cover|contain box=x0,y0,x1,y1
+//   harness render IN.ppm OUT.pgm out_w=800 out_h=350 ps=0 frame=none|builtin scale=4 ac=1 fit=cover|contain|pad box=x0,y0,x1,y1
 use ddn_dither::autocontrast;
 use ddn_dither::frame::Frame;
 use ddn_dither::gray::{Plane, RgbImage};
@@ -52,7 +52,11 @@ fn main() {
             let gray = RgbImage::new(w, h, d).to_gray();
             let frame = if g("frame", "none") == "builtin" { Some(Frame::builtin()) } else { None };
             let bx: Vec<f64> = g("box", &format!("0,0,{w},{h}")).split(',').map(|s| s.parse().unwrap()).collect();
-            let fit = if g("fit", "cover") == "contain" { Fit::Contain } else { Fit::Cover(BoxF { x0: bx[0], y0: bx[1], x1: bx[2], y1: bx[3] }) };
+            let fit = match g("fit", "cover").as_str() {
+                "contain" => Fit::Contain,
+                "pad" => Fit::EdgeRepeat,
+                _ => Fit::Cover(BoxF { x0: bx[0], y0: bx[1], x1: bx[2], y1: bx[3] }),
+            };
             let p = Params {
                 fit,
                 out_w: g("out_w", "800").parse().unwrap(),

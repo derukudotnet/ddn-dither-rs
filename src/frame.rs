@@ -22,6 +22,8 @@ pub struct Rect {
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub name: String,
+    /// Dropdown section the frame belongs to ("Built-in", a folder name, "Custom", or "").
+    pub group: String,
     pub w: usize,
     pub h: usize,
     /// Level 0..=3 per pixel (meaningless where `opaque` is false).
@@ -71,6 +73,7 @@ impl Frame {
         let hole = Rect { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
         Ok(Frame {
             name: name.to_string(),
+            group: String::new(),
             w,
             h,
             levels,
@@ -90,7 +93,7 @@ impl Frame {
 
     /// Every compiled-in frame (all `assets/frame_<id>.bin`), in file-name order.
     pub fn builtins() -> impl Iterator<Item = Frame> {
-        builtin_files::BUILTIN_FRAME_FILES.iter().map(|(id, name, data)| parse_builtin(id, name, data))
+        builtin_files::BUILTIN_FRAME_FILES.iter().map(|(id, group, data)| parse_builtin(id, group, data))
     }
 
     /// A compiled-in frame by id (the part after `frame_` in `assets/frame_<id>.bin`).
@@ -98,7 +101,7 @@ impl Frame {
         builtin_files::BUILTIN_FRAME_FILES
             .iter()
             .find(|(bid, _, _)| *bid == id)
-            .map(|(_, name, data)| parse_builtin(id, name, data))
+            .map(|(_, group, data)| parse_builtin(id, group, data))
     }
 
     /// Ids of all compiled-in frames, for error messages.
@@ -116,7 +119,7 @@ mod builtin_files {
     include!(concat!(env!("OUT_DIR"), "/builtin_frames.rs"));
 }
 
-fn parse_builtin(id: &str, name: &str, data: &[u8]) -> Frame {
+fn parse_builtin(id: &str, group: &str, data: &[u8]) -> Frame {
     let w = data[0] as usize | (data[1] as usize) << 8;
     let h = data[2] as usize | (data[3] as usize) << 8;
     let px = &data[4..];
@@ -131,7 +134,9 @@ fn parse_builtin(id: &str, name: &str, data: &[u8]) -> Frame {
             rgba.extend_from_slice(&[g, g, g, 255]);
         }
     }
-    Frame::from_rgba(name, w, h, &rgba).expect("built-in frame is valid")
+    let mut f = Frame::from_rgba(id, w, h, &rgba).expect("built-in frame is valid");
+    f.group = group.to_string();
+    f
 }
 
 #[cfg(test)]

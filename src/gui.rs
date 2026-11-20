@@ -88,7 +88,7 @@ struct RenderKey {
     scale: usize,
     autocontrast: bool,
     contrast: f64,
-    contain: bool,
+    fit: usize,
     proxy: bool,
     source_id: u64,
 }
@@ -98,6 +98,11 @@ struct Preview {
     grid: (usize, usize),
     levels: Vec<u8>,
     palette: Palette,
+    /// Output pixels per dither pixel (rendered scale), so 100% shows the file 1:1.
+    scale: usize,
+    out: (usize, usize),
+    /// Exact encoded output size; None while a fast proxy render is shown.
+    size: Option<u64>,
 }
 
 struct App {
@@ -114,9 +119,10 @@ struct App {
     out_w: usize,
     out_h: usize,
     pixel_size: usize,
-    fit_contain: bool,
+    fit_mode: usize,
     autocontrast: bool,
     contrast: f64,
+    snap_pixels: bool,
     guides: Guides,
     format: Format,
 
@@ -131,6 +137,11 @@ struct App {
 
     preview: Option<Preview>,
     last_key: Option<RenderKey>,
+    /// None = fit into the pane; Some(z) = z screen pixels per output pixel (1.0 = 100%).
+    preview_zoom: Option<f32>,
+    pv_pan: (f32, f32),
+    /// Effective fit scale of the preview, for the toolbar indicator (updated each frame).
+    pv_fit: f32,
 
     output_override: Option<String>,
     exit_on_save: bool,
@@ -180,7 +191,7 @@ impl App {
                 Some(f) => frame_idx = frames.iter().position(|g| g.name == f.name),
                 None => status = format!("unknown built-in frame '{id}'"),
             },
-            FrameSel::Path(p) => match io::load_frame(p) {
+            FrameSel::Path(p) => match io::load_frame(p, "Custom") {
                 Ok(f) => {
                     frames.push(f);
                     frame_idx = Some(frames.len() - 1);
@@ -210,9 +221,10 @@ impl App {
             out_w: 800,
             out_h: 350,
             pixel_size: cli.pixel_size,
-            fit_contain: cli.crop_mode == CropMode::Contain,
+            fit_mode: fit_mode_of(cli.crop_mode),
             autocontrast: cli.autocontrast,
             contrast: cli.contrast,
+            snap_pixels: false,
             guides: Guides::Thirds,
             format: cli.format,
             frames,
@@ -224,6 +236,9 @@ impl App {
             pal_error: None,
             preview: None,
             last_key: None,
+            preview_zoom: None,
+            pv_pan: (0.0, 0.0),
+            pv_fit: 1.0,
             output_override: cli.output.clone(),
             exit_on_save: !cli.inputs.is_empty(),
             status,
@@ -318,7 +333,11 @@ impl App {
 
     fn params<'a>(&'a self, crop: BoxF) -> Params<'a> {
         Params {
-            fit: if self.fit_contain { Fit::Contain } else { Fit::Cover(crop) },
+            fit: match self.fit_mode {
+                1 => Fit::Contain,
+                2 => Fit::EdgeRepeat,
+                _ => Fit::Cover(crop),
+            },
             out_w: self.out_w,
             out_h: self.out_h,
             pixel_size: self.pixel_size,
@@ -351,7 +370,7 @@ impl App {
             scale: self.frame_scale,
             autocontrast: self.autocontrast,
             contrast: self.contrast,
-            contain: self.fit_contain,
+            fit: self.fit_mode,
             proxy: use_proxy,
             source_id: self.source_id,
         }
@@ -372,6 +391,15 @@ impl App {
                     );
                     pv.tex.set(img, TextureOptions::NEAREST);
                     pv.palette = self.palette;
+                    let full = pipeline::Rendered {
+                        grid_w: pv.grid.0,
+                        grid_h: pv.grid.1,
+                        levels: pv.levels.clone(),
+                        scale: pv.scale,
+                        out_w: pv.out.0,
+                        out_h: pv.out.1,
+                    };
+                    pv.size = Some(io::encoded_size(self.format, &full, &self.palette));
                     ctx.request_repaint();
                 }
             }
@@ -384,11 +412,16 @@ impl App {
                 egui::ColorImage::from_rgb([r.grid_w, r.grid_h], &rgb),
                 TextureOptions::NEAREST,
             );
+            let out = (r.out_w, r.out_h);
+            let size = (!use_proxy).then(|| io::encoded_size(self.format, &r, &self.palette));
             self.preview = Some(Preview {
                 tex,
                 grid: (r.grid_w, r.grid_h),
                 levels: r.levels,
                 palette: self.palette,
+                scale: r.scale,
+                out,
+                size,
             });
             self.last_key = Some(key);
             ctx.request_repaint();
@@ -441,6 +474,63 @@ impl App {
         }
     }
 
+    fn reset_settings(&mut self) {
+        self.frame_idx = match &self.cli.frame {
+            FrameSel::None => None,
+            FrameSel::Builtin => Some(0),
+            FrameSel::Name(id) => Frame::builtin_named(id).and_then(|f| self.frames.iter().position(|g| g.name == f.name)),
+            FrameSel::Path(p) => {
+                let stem = Path::new(p).file_stem().and_then(|n| n.to_str()).unwrap_or(p);
+                self.frames.iter().position(|g| g.name == stem)
+            }
+        };
+        if let Some(pi) = palette::by_name(&self.cli.palette) {
+            self.pal_idx = palette::names().iter().position(|n| *n == self.cli.palette.to_ascii_lowercase()).unwrap_or(0);
+            self.custom_pal_text = String::new();
+            self.palette = pi;
+        } else {
+            self.pal_idx = palette::BUILTIN.len();
+            self.custom_pal_text = self.cli.palette.clone();
+            self.palette = palette::resolve(&self.cli.palette).unwrap_or(palette::BUILTIN[0].1);
+        }
+        self.pal_error = None;
+        self.pixel_size = self.cli.pixel_size;
+        self.fit_mode = fit_mode_of(self.cli.crop_mode);
+        self.autocontrast = self.cli.autocontrast;
+        self.contrast = self.cli.contrast;
+        self.snap_pixels = false;
+        self.frame_scale = self.cli.scale;
+        self.format = self.cli.format;
+        self.guides = Guides::Thirds;
+        if let Some(src) = &self.source {
+            let (ow, oh) = cli::resolve_size(&self.cli, src.w, src.h);
+            self.out_w = ow;
+            self.out_h = oh;
+            let a = ow as f64 / oh as f64;
+            self.aspect_idx = ASPECT_PRESETS.iter().position(|(_, p)| *p > 0.0 && (p - a).abs() < 0.002).unwrap_or(0);
+            self.last_aspect = self.aspect();
+            self.crop = CropBox::max_fit(src.w as f64, src.h as f64, self.aspect());
+        } else {
+            self.out_w = 800;
+            self.out_h = 350;
+            self.aspect_idx = 0;
+        }
+        self.drag = None;
+        self.last_key = None;
+        self.status = "Settings reset to startup values.".to_string();
+    }
+
+    /// With integer scaling on, keep the output size exactly as set and instead snap the
+    /// pixel size to the nearest value that divides both sides, so every dither block is a
+    /// whole, uncropped N x N and the resolution the user asked for is preserved.
+    fn snap_pixels_to_output(&mut self) {
+        let eff = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
+        if self.out_w.is_multiple_of(eff) && self.out_h.is_multiple_of(eff) {
+            return;
+        }
+        self.pixel_size = snap_pixel_size(self.out_w, self.out_h, eff);
+    }
+
     fn open_dialog(&mut self, ctx: &egui::Context) {
         let picked = rfd::FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
@@ -455,7 +545,7 @@ impl App {
         else {
             return;
         };
-        match io::load_frame(&p.to_string_lossy()) {
+        match io::load_frame(&p.to_string_lossy(), "Custom") {
             Ok(f) => {
                 self.frames.push(f);
                 self.frame_idx = Some(self.frames.len() - 1);
@@ -472,25 +562,44 @@ impl App {
             self.open_dialog(ctx);
         }
         if let Some(src) = &self.source {
-            ui.label(format!("{}  ({}×{})", file_name(&src.path), src.w, src.h));
+            ui.add(egui::Label::new(format!("{}  ({}×{})", file_name(&src.path), src.w, src.h)).truncate());
         }
         ui.separator();
 
         // ---- frame
         ui.strong("Frame");
         egui::ComboBox::from_id_salt("frame")
-            .selected_text(self.frame().map(|f| f.name.clone()).unwrap_or_else(|| "None".to_string()))
+            .selected_text(self.frame().map(|f| pretty_frame_name(&f.name)).unwrap_or_else(|| "None".to_string()))
             .width(220.0)
             .show_ui(ui, |ui| {
+                ui.set_min_width(200.0);
                 ui.selectable_value(&mut self.frame_idx, None, "None");
+                let group_of = |i: usize| -> String {
+                    let g = &self.frames[i].group;
+                    if g.is_empty() { "Built-in".to_string() } else { g.clone() }
+                };
+                let mut groups: Vec<String> = Vec::new();
                 for i in 0..self.frames.len() {
-                    let name = self.frames[i].name.clone();
-                    ui.selectable_value(&mut self.frame_idx, Some(i), name);
+                    let g = group_of(i);
+                    if !groups.contains(&g) {
+                        groups.push(g);
+                    }
+                }
+                groups.sort_by(|a, b| group_rank(a).cmp(&group_rank(b)).then_with(|| a.cmp(b)));
+                for g in &groups {
+                    ui.separator();
+                    ui.strong(pretty_frame_name(g));
+                    for i in 0..self.frames.len() {
+                        if &group_of(i) == g {
+                            let name = pretty_frame_name(&self.frames[i].name);
+                            ui.selectable_value(&mut self.frame_idx, Some(i), name);
+                        }
+                    }
                 }
             })
             .response
             .on_hover_text(
-                "A frame is four-tone art with a transparent window for the photo. It sets the output size and locks the crop to the window's aspect.",
+                "A frame is four-tone art with a transparent window for the photo. It sets the output size and locks the crop to the window's aspect. Frames are grouped by the folder they came from: assets/ is Built-in, an assets/<sub>/ or frames/<sub>/ subfolder is its own group, frames/ top level is Custom.",
             );
         if ui
             .small_button("Load frame file…")
@@ -505,31 +614,27 @@ impl App {
         let info = self.frame().map(|f| (f.hole.w, f.hole.h, f.w, f.h, f.source_grey_values, f.hole_is_rect));
         let framed = info.is_some();
         if let Some((hole_w, hole_h, fw, fh, greys, hole_is_rect)) = info {
-            ui.label(format!("Window {hole_w}×{hole_h} px, frame {fw}×{fh} px"));
+            ui.add(egui::Label::new(format!("Window {hole_w}×{hole_h} px, frame {fw}×{fh} px")).truncate());
             if greys > 4 {
-                ui.colored_label(Color32::from_rgb(200, 140, 0), format!("Converted from {greys} grey values to 4 tones."));
+                ui.add(egui::Label::new(egui::RichText::new(format!("Converted from {greys} grey values to 4 tones.")).color(Color32::from_rgb(200, 140, 0))).truncate());
             }
             if !hole_is_rect {
-                ui.colored_label(Color32::from_rgb(200, 140, 0), "Window is not a plain rectangle; the photo fills its bounding box.");
+                ui.add(egui::Label::new(egui::RichText::new("Window is not a plain rectangle; the photo fills its bounding box.").color(Color32::from_rgb(200, 140, 0))).truncate());
             }
-            ui.horizontal(|ui| {
-                ui.label("Scale");
-                ui.add(egui::DragValue::new(&mut self.frame_scale).range(1..=16).prefix("×"));
-            });
-            let s = self.frame_scale.max(1);
-            ui.label(format!("Output {}×{} px (set by the frame)", fw * s, fh * s));
             ui.add(
                 egui::Slider::new(&mut self.frame_scale, 1..=16)
                     .custom_formatter(|n, _| format!("×{n:.0}"))
                     .text("Scale"),
             )
             .on_hover_text("Integer upscale of the framed image. ×4 makes 640×576 for the built-in frame.");
+            let s = self.frame_scale.max(1);
+            ui.add(egui::Label::new(format!("Output {}×{} px (set by the frame)", fw * s, fh * s)).truncate());
         }
         ui.separator();
 
         // ---- size / aspect
         ui.add_enabled_ui(!framed, |ui| {
-            ui.strong("Size");
+            ui.strong("Size & crop");
             let before_idx = self.aspect_idx;
             egui::ComboBox::from_id_salt("aspect")
                 .selected_text(format!("Aspect: {}", ASPECT_PRESETS[self.aspect_idx].0))
@@ -546,12 +651,20 @@ impl App {
                 let a = ASPECT_PRESETS[self.aspect_idx].1;
                 self.out_h = ((self.out_w as f64 / a).round() as usize).max(1);
             }
-            let (ow, oh) = (self.out_w, self.out_h);
+            let (ow, oh, old_ps, snap_before) = (self.out_w, self.out_h, self.pixel_size, self.snap_pixels);
             ui.horizontal(|ui| {
                 ui.label("W");
                 ui.add(egui::DragValue::new(&mut self.out_w).range(1..=16384));
                 ui.label("H");
                 ui.add(egui::DragValue::new(&mut self.out_h).range(1..=16384));
+                if ui.small_button("⇄").on_hover_text("Swap width and height").clicked() {
+                    std::mem::swap(&mut self.out_w, &mut self.out_h);
+                    let a = self.out_w.max(1) as f64 / self.out_h.max(1) as f64;
+                    self.aspect_idx = ASPECT_PRESETS
+                        .iter()
+                        .position(|(_, p)| *p > 0.0 && (p - a).abs() < 0.002)
+                        .unwrap_or(0);
+                }
             })
             .response
             .on_hover_text("Output size in pixels. With an aspect preset, changing one side adjusts the other.");
@@ -563,41 +676,64 @@ impl App {
                     self.out_w = ((self.out_h as f64 * a).round() as usize).max(1);
                 }
             }
-            ui.horizontal(|ui| {
-                ui.label("Pixel size");
-                ui.add(
-                    egui::Slider::new(&mut self.pixel_size, 0..=32)
-                        .custom_formatter(|n, _| if n == 0.0 { "auto".to_string() } else { format!("{n:.0}") })
-                        .custom_parser(|s| {
-                            if s.trim().eq_ignore_ascii_case("auto") { Some(0.0) } else { s.trim().parse::<f64>().ok() }
-                        }),
+            if self.snap_pixels {
+                let eff = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Pixel size");
+                    if ui.selectable_label(self.pixel_size == 0, "auto").clicked() {
+                        self.pixel_size = 0;
+                    }
+                    for cand in 1..=32 {
+                        if self.out_w.is_multiple_of(cand) && self.out_h.is_multiple_of(cand) {
+                            let selected = self.pixel_size == cand;
+                            let text = if eff == cand { format!("{cand} ✓") } else { cand.to_string() };
+                            if ui.selectable_label(selected, text).clicked() {
+                                self.pixel_size = cand;
+                            }
+                        }
+                    }
+                    ui.weak(format!("{gw}×{gh} grid", gw = self.out_w.div_ceil(eff), gh = self.out_h.div_ceil(eff)));
+                })
+                .response
+                .on_hover_text(
+                    "Output pixels per dithered pixel; Integer scale keeps only the sizes that divide the output exactly, so every dither block stays a whole, uncropped N×N and the check mark marks the effective one (auto falls back to it). The readout shows the resulting grid size (pixels across = grid width). The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
                 );
-                if self.pixel_size == 0 {
-                    ui.weak(format!("→ {}", pipeline::auto_pixel_size(self.out_w)));
-                }
-            })
-            .response
-            .on_hover_text(
-                "Output pixels per dithered pixel. auto aims for ~384 dithered pixels across; bigger = blockier.",
-            );
-            ui.horizontal(|ui| {
-                ui.label("Contrast");
-                ui.add(
-                    egui::Slider::new(&mut self.contrast, 0.25..=4.0)
-                        .custom_formatter(|n, _| format!("{n:.2}"))
-                        .custom_parser(|s| s.trim().parse::<f64>().ok()),
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Pixel size");
+                    ui.add(
+                        egui::Slider::new(&mut self.pixel_size, 0..=32)
+                            .custom_formatter(|n, _| if n == 0.0 { "auto".to_string() } else { format!("{n:.0}") })
+                            .custom_parser(|s| {
+                                if s.trim().eq_ignore_ascii_case("auto") { Some(0.0) } else { s.trim().parse::<f64>().ok() }
+                            }),
+                    );
+                    let ps = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
+                    if self.pixel_size == 0 {
+                        ui.weak(format!("→ {ps}"));
+                    }
+                    ui.weak(format!("{gw}×{gh} grid", gw = self.out_w.div_ceil(ps), gh = self.out_h.div_ceil(ps)));
+                    let (cw, ch) = (self.out_w % ps, self.out_h % ps);
+                    if cw != 0 || ch != 0 {
+                        ui.weak(format!("(crops {cw}×{ch} px)"));
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Output pixels per dithered pixel; the readout shows the resulting grid size (pixels across = grid width) and whether any row/column of the output would be cropped. The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
                 );
-                if ui.small_button("Reset").on_hover_text("Back to no extra contrast (1.00)").clicked() {
-                    self.contrast = 1.0;
-                }
-            })
-            .response
-            .on_hover_text("Manual contrast around mid-grey, applied after auto contrast. 1.00 = no change.");
+            }
+            ui.checkbox(&mut self.snap_pixels, "Integer scale")
+                .on_hover_text(
+                    "Replaces the pixel-size slider while it is on: only sizes that divide your output exactly are offered, so every dither block stays a whole, uncropped N×N and the output size is never changed (turning it off brings the free slider back).",
+                )
+                .changed();
+            if self.snap_pixels
+                && (self.pixel_size != old_ps || self.out_w != ow || self.out_h != oh || self.snap_pixels != snap_before)
+            {
+                self.snap_pixels_to_output();
+            }
         });
-        ui.checkbox(&mut self.fit_contain, "Fit whole image (pad instead of crop)")
-            .on_hover_text("Scales the whole picture into the output instead of cropping it; the padding uses the darkest tone.");
-        ui.checkbox(&mut self.autocontrast, "Auto contrast")
-            .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
         if ui
             .button(format!("Guides: {}", self.guides.name()))
             .on_hover_text("Guide lines over the crop box to help alignment: rule-of-thirds lines and/or a full-size crosshair through the crop centre.")
@@ -605,6 +741,35 @@ impl App {
         {
             self.guides = self.guides.next();
         }
+        ui.horizontal(|ui| {
+            ui.label("Fit");
+            for (i, name) in ["Crop", "Pad", "Edge pad"].iter().enumerate() {
+                if ui.selectable_label(self.fit_mode == i, *name).clicked() {
+                    self.fit_mode = i;
+                }
+            }
+        })
+        .response
+        .on_hover_text("How the picture fills the output. Crop: centre-crop to the output aspect. Pad: scale the whole picture in and fill the rest with the darkest tone. Edge pad: fill the rest by repeating the picture's outermost rows and columns, so the image looks smeared out to the edges.");
+        ui.separator();
+
+        // ---- contrast
+        ui.strong("Contrast");
+        ui.checkbox(&mut self.autocontrast, "Auto contrast")
+            .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
+        ui.horizontal(|ui| {
+            ui.label("Contrast");
+            ui.add(
+                egui::Slider::new(&mut self.contrast, 0.25..=4.0)
+                    .custom_formatter(|n, _| format!("{n:.2}"))
+                    .custom_parser(|s| s.trim().parse::<f64>().ok()),
+            );
+            if ui.small_button("Reset").on_hover_text("Back to no extra contrast (1.00)").clicked() {
+                self.contrast = 1.0;
+            }
+        })
+        .response
+        .on_hover_text("Manual contrast around mid-grey, applied after auto contrast. 1.00 = no change.");
         ui.separator();
 
         // ---- palette
@@ -672,7 +837,7 @@ impl App {
             .on_hover_text("PNG output is 2-bit indexed (a few KB). WebP is lossless full-colour and bigger.");
         let have = self.source.is_some();
         ui.horizontal(|ui| {
-            let label = if self.exit_on_save { "Save & quit  (Enter)" } else { "Save  (Enter)" };
+            let label = if self.exit_on_save { "Save & quit" } else { "Save" };
             if ui
                 .add_enabled(have, egui::Button::new(label))
                 .on_hover_text("Saves to the destination shown below, replacing an earlier file of the same name.")
@@ -693,10 +858,10 @@ impl App {
                 Some(p) => p.clone(),
                 None => cli::default_output(&self.source.as_ref().map(|s| s.path.clone()).unwrap_or_default(), self.format),
             };
-            ui.weak(format!("→ {}", file_name(&dest)));
+            ui.add(egui::Label::new(egui::RichText::new(format!("→ {}", file_name(&dest))).weak()).truncate());
         }
         ui.separator();
-        ui.label(&self.status);
+        ui.add(egui::Label::new(self.status.as_str()).truncate());
         ui.add_space(6.0);
         let hint = if self.dnd_native_wayland {
             "Drag inside the box to move it; drag a handle to resize (opposite side stays put). Esc closes."
@@ -704,6 +869,16 @@ impl App {
             "Drag inside the box to move it; drag a handle to resize (opposite side stays put). Drop another image anywhere to switch. Esc closes."
         };
         ui.weak(hint);
+        ui.add_space(10.0);
+        ui.vertical_centered_justified(|ui| {
+            if ui
+                .small_button("Reset all settings")
+                .on_hover_text("Return every option to its startup value: size, pixel size, contrast, frame selection and scale, palette, crop box.")
+                .clicked()
+            {
+                self.reset_settings();
+            }
+        });
     }
 
     fn main_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -721,9 +896,10 @@ impl App {
         };
 
         let avail = ui.available_size();
-        let source_h = (avail.y * 0.58).max(160.0);
+        const IMG_PAD: f32 = 14.0;
+        let source_h = (avail.y * 0.58).max(160.0 + 2.0 * IMG_PAD);
         let (resp, painter) = ui.allocate_painter(vec2(avail.x, source_h), Sense::click_and_drag());
-        let area = resp.rect;
+        let area = resp.rect.shrink2(vec2(8.0, IMG_PAD));
         let scale = (area.width() as f64 / iw).min(area.height() as f64 / ih).max(1e-6);
         let img_rect = Rect::from_center_size(area.center(), vec2((iw * scale) as f32, (ih * scale) as f32));
         painter.image(tex_id, img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -731,7 +907,7 @@ impl App {
         let to_img = |p: egui::Pos2| ((p.x - img_rect.min.x) as f64 / scale, (p.y - img_rect.min.y) as f64 / scale);
         let to_screen = |x: f64, y: f64| pos2(img_rect.min.x + (x * scale) as f32, img_rect.min.y + (y * scale) as f32);
 
-        if !self.fit_contain {
+        if self.fit_mode == 0 {
             // ---- interaction
             let tol = 10.0 / scale;
             let aspect = self.aspect();
@@ -836,15 +1012,103 @@ impl App {
 
         // ---- live preview
         ui.separator();
+        let pv_bytes = self.preview.as_ref().and_then(|pv| pv.size);
+        let pv_info = self
+            .preview
+            .as_ref()
+            .map(|pv| format!("{0}×{1} px · {2}×{3} grid ×{4}", pv.out.0, pv.out.1, pv.grid.0, pv.grid.1, pv.scale));
+        let mut header = "Preview".to_string();
+        if let Some(info) = &pv_info {
+            header.push_str(" · ");
+            header.push_str(info);
+        }
+        if let Some(b) = pv_bytes {
+            header.push_str(&format!(" · {}", human_size(b)));
+        }
+        ui.horizontal(|ui| {
+            ui.weak(header.as_str());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .selectable_label(self.preview_zoom.is_none(), "Fit")
+                    .on_hover_text("Scale the preview to fill the pane.")
+                    .clicked()
+                {
+                    self.preview_zoom = None;
+                    self.pv_pan = (0.0, 0.0);
+                }
+                if ui
+                    .selectable_label(self.preview_zoom == Some(1.0), "100%")
+                    .on_hover_text("One screen pixel per output pixel - pixel-for-pixel what the saved file contains.")
+                    .clicked()
+                {
+                    self.preview_zoom = Some(1.0);
+                }
+                if let Some(z) = self.preview_zoom {
+                    ui.weak(format!("{:.0}%", z * 100.0));
+                } else {
+                    ui.weak(format!("Fit · {:.0}%", self.pv_fit * 100.0));
+                }
+            });
+        })
+        .response
+        .on_hover_text(
+            "Zoom the preview: wheel zooms at the pointer, drag pans, double-click returns to Fit. Zoom and pan survive re-renders, so you can compare pixel sizes on the same spot. The header shows the output resolution, dither grid with the effective pixel size, and the exact size the output file will have.",
+        );
         let pv_size = ui.available_size();
-        let (pv_rect, _) = ui.allocate_exact_size(pv_size, Sense::hover());
-        if let Some(pv) = &self.preview {
-            let (gw, gh) = (pv.grid.0 as f32, pv.grid.1 as f32);
-            let fit = (pv_rect.width() / gw).min(pv_rect.height() / gh);
-            let s = if fit >= 1.0 { fit.floor() } else { fit }; // whole-number zoom keeps pixels crisp
-            let r = Rect::from_center_size(pv_rect.center(), vec2(gw * s, gh * s));
+        let (pv_rect, pv_resp) = ui.allocate_exact_size(pv_size, Sense::click_and_drag());
+        let pv_info = self
+            .preview
+            .as_ref()
+            .map(|pv| (pv.tex.id(), pv.grid.0 as f32 * pv.scale as f32, pv.grid.1 as f32 * pv.scale as f32));
+        if let Some((tex_id, nw, nh)) = pv_info {
+            let fit = (pv_rect.width() / nw).min(pv_rect.height() / nh);
+            let s = match self.preview_zoom {
+                None => {
+                    if fit >= 1.0 { fit.floor() } else { fit } // whole-number zoom keeps pixels crisp
+                }
+                Some(z) => z,
+            };
+            self.pv_fit = s;
+            let ov = (
+                ((nw * s - pv_rect.width()) / 2.0).max(0.0),
+                ((nh * s - pv_rect.height()) / 2.0).max(0.0),
+            );
+            let cl = |v: f32, o: f32| v.clamp(-o, o);
+            if pv_resp.dragged() {
+                let d = pv_resp.drag_delta();
+                self.pv_pan = (cl(self.pv_pan.0 + d.x, ov.0), cl(self.pv_pan.1 + d.y, ov.1));
+            }
+            if pv_resp.hovered() {
+                let dz = ctx.input(|i| i.raw_scroll_delta.y);
+                if dz != 0.0 {
+                    let z0 = self.preview_zoom.unwrap_or(if fit >= 1.0 { fit.floor() } else { fit });
+                    let z = (z0 * (dz / 250.0).exp()).clamp(0.1, 16.0);
+                    if let Some(pos) = pv_resp.hover_pos() {
+                        let cur = Rect::from_center_size(pv_rect.center() + vec2(self.pv_pan.0, self.pv_pan.1), vec2(nw, nh) * z0);
+                        let u = ((pos.x - cur.min.x) / cur.width(), (pos.y - cur.min.y) / cur.height());
+                        let next = Rect::from_min_size(
+                            pos2(pos.x - u.0 * nw * z, pos.y - u.1 * nh * z),
+                            vec2(nw * z, nh * z),
+                        );
+                        let c = next.center() - pv_rect.center();
+                        self.pv_pan = (cl(c.x, ov.0), cl(c.y, ov.1));
+                    }
+                    self.preview_zoom = Some(z);
+                }
+            }
+            if pv_resp.double_clicked() {
+                self.preview_zoom = None;
+                self.pv_pan = (0.0, 0.0);
+            }
+            if self.preview_zoom.is_some() && (pv_resp.hovered() || pv_resp.dragged()) {
+                ctx.set_cursor_icon(if pv_resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+            }
+            let r = Rect::from_center_size(
+                pv_rect.center() + vec2(self.pv_pan.0, self.pv_pan.1),
+                vec2(nw, nh) * s,
+            );
             let p = ui.painter_at(pv_rect);
-            p.image(pv.tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            p.image(tex_id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
     }
 }
@@ -868,6 +1132,62 @@ fn file_name(path: &str) -> String {
     Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string()
 }
 
+/// Compact file-size label for the preview header.
+fn human_size(n: u64) -> String {
+    if n >= 1 << 20 {
+        format!("{:.1} MiB", n as f64 / (1 << 20) as f64)
+    } else if n >= 1 << 10 {
+        format!("{:.1} KiB", n as f64 / (1 << 10) as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
+fn snap_pixel_size(w: usize, h: usize, want: usize) -> usize {
+    (1..=32)
+        .filter(|ps| w.is_multiple_of(*ps) && h.is_multiple_of(*ps))
+        .min_by_key(|ps| (want as i64 - *ps as i64).abs())
+        .unwrap_or(1)
+}
+
+fn fit_mode_of(mode: CropMode) -> usize {
+    match mode {
+        CropMode::Contain => 1,
+        CropMode::PadRepeat => 2,
+        CropMode::Cover | CropMode::Interactive => 0,
+    }
+}
+
+/// Dropdown section order: built-ins first, folder groups in between, Custom last.
+fn group_rank(g: &str) -> usize {
+    match g {
+        "Built-in" => 0,
+        "Custom" => usize::MAX,
+        _ => 1,
+    }
+}
+
+/// Display name for a frame: "film_roll" -> "Film Roll".
+fn pretty_frame_name(raw: &str) -> String {
+    let (id, suffix) = match raw.find(" (") {
+        Some(i) => (&raw[..i], &raw[i..]),
+        None => (raw, ""),
+    };
+    let pretty = id
+        .split(|c: char| c == '_' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut cs = w.chars();
+            match cs.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + cs.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{pretty}{suffix}")
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Dropped files (native: the path is available)
@@ -876,22 +1196,48 @@ impl eframe::App for App {
             self.load(ctx, &p.to_string_lossy());
         }
 
-        // Keyboard: Enter saves, Esc closes the window
-        if !ctx.wants_keyboard_input() {
-            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && self.source.is_some() {
-                self.quick_save(ctx);
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+        // Keyboard: Esc closes the window
+        if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
-        egui::SidePanel::right("options").min_width(300.0).default_width(320.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.options_ui(ui, ctx));
-        });
+        egui::SidePanel::right("options")
+            .width_range(300.0..=520.0)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.options_ui(ui, ctx));
+            });
         egui::CentralPanel::default().show(ctx, |ui| self.main_ui(ui, ctx));
 
         self.sync_crop_aspect();
         self.refresh_preview(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snap_pixel_size;
+
+    #[test]
+    fn snapping_keeps_valid_pixel_sizes() {
+        assert_eq!(snap_pixel_size(800, 350, 2), 2);
+        assert_eq!(snap_pixel_size(800, 350, 4), 5);
+        assert_eq!(snap_pixel_size(800, 350, 5), 5);
+    }
+
+    #[test]
+    fn snapping_picks_the_nearest_divisor() {
+        assert_eq!(snap_pixel_size(800, 350, 3), 2);
+        assert_eq!(snap_pixel_size(800, 315, 4), 5);
+    }
+
+    #[test]
+    fn snapping_falls_back_to_one_when_nothing_divides() {
+        assert_eq!(snap_pixel_size(7, 5, 4), 1);
+    }
+
+    #[test]
+    fn snapping_never_exceeds_the_slider_range() {
+        assert_eq!(snap_pixel_size(800, 400, 60), 25);
     }
 }

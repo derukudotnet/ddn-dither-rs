@@ -63,7 +63,7 @@ fn load_selected_frame(sel: &FrameSel) -> Result<Option<Frame>, String> {
                 if Frame::builtin_ids().is_empty() { "none".to_string() } else { Frame::builtin_ids().join(", ") }
             )),
         },
-        FrameSel::Path(p) => io::load_frame(p).map(Some),
+        FrameSel::Path(p) => io::load_frame(p, "Custom").map(Some),
     }
 }
 
@@ -121,10 +121,15 @@ fn convert_one(cli: &Cli, input: &str, pal: &palette::Palette, frame: Option<&Fr
         autocontrast: cli.autocontrast,
         contrast: cli.contrast,
     };
-    if cli.crop_mode == CropMode::Cover {
-        let aspect = pipeline::crop_aspect(&params);
-        params.fit = Fit::Cover(CropBox::max_fit(gray.w as f64, gray.h as f64, aspect).to_box());
-    }
+    params.fit = match cli.crop_mode {
+        CropMode::Cover => {
+            let aspect = pipeline::crop_aspect(&params);
+            Fit::Cover(CropBox::max_fit(gray.w as f64, gray.h as f64, aspect).to_box())
+        }
+        CropMode::Contain => Fit::Contain,
+        CropMode::PadRepeat => Fit::EdgeRepeat,
+        CropMode::Interactive => Fit::Contain,
+    };
     let rendered = pipeline::render(&gray, &params);
     let out = cli.output.clone().unwrap_or_else(|| cli::default_output(input, cli.format));
     io::save(&out, &rendered, pal)?;

@@ -7,6 +7,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use ddn_dither::frame::Frame;
+#[cfg(feature = "gui")]
+use ddn_dither::cli::Format;
 use ddn_dither::gray::RgbImage;
 use ddn_dither::pack::pack_2bit;
 use ddn_dither::palette::Palette;
@@ -29,11 +31,13 @@ pub fn load_rgb(path: &str) -> Result<RgbImage, String> {
 }
 
 /// Load a frame PNG (needs an alpha channel with a transparent window).
-pub fn load_frame(path: &str) -> Result<Frame, String> {
+pub fn load_frame(path: &str, group: &str) -> Result<Frame, String> {
     let img = image::open(path).map_err(|e| format!("cannot open frame {path}: {e}"))?.to_rgba8();
     let (w, h) = img.dimensions();
     let name = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
-    Frame::from_rgba(name, w as usize, h as usize, img.as_raw())
+    let mut f = Frame::from_rgba(name, w as usize, h as usize, img.as_raw())?;
+    f.group = group.to_string();
+    Ok(f)
 }
 
 /// Folders searched for extra frames: `frames/` next to the executable and the user config dir.
@@ -62,13 +66,25 @@ pub fn discover_frames() -> (Vec<Frame>, Vec<String>) {
     let mut warnings = Vec::new();
     for dir in frame_dirs() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        let mut paths: Vec<PathBuf> = rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("png")).unwrap_or(false))
-            .collect();
-        paths.sort();
-        for p in paths {
-            match load_frame(&p.to_string_lossy()) {
+        let is_png = |p: &PathBuf| {
+            p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("png")).unwrap_or(false)
+        };
+        let mut entries: Vec<(String, PathBuf)> = Vec::new();
+        for e in rd.filter_map(|e| e.ok().map(|e| e.path())) {
+            if e.is_dir() {
+                for f in std::fs::read_dir(&e).into_iter().flatten().filter_map(|x| x.ok().map(|x| x.path())) {
+                    if is_png(&f) {
+                        let sub = e.file_name().and_then(|n| n.to_str().map(String::from)).unwrap_or_default();
+                        entries.push((sub, f));
+                    }
+                }
+            } else if is_png(&e) {
+                entries.push(("Custom".to_string(), e));
+            }
+        }
+        entries.sort();
+        for (group, p) in entries {
+            match load_frame(&p.to_string_lossy(), &group) {
                 Ok(f) => frames.push(f),
                 Err(e) => warnings.push(format!("{}: {e}", p.display())),
             }
@@ -111,4 +127,41 @@ pub fn save(path: &str, r: &Rendered, pal: &Palette) -> Result<(), String> {
         writer.write_image_data(&packed).map_err(|e| format!("cannot write {path}: {e}"))?;
         writer.finish().map_err(|e| format!("cannot write {path}: {e}"))
     }
+}
+
+/// Exact byte length the rendered image would have when saved in `fmt`, without touching the disk.
+/// Uses the identical encoders/settings as `save`, so the number matches the real file.
+#[cfg(feature = "gui")]
+pub fn encoded_size(fmt: Format, r: &Rendered, pal: &Palette) -> u64 {
+    let mut buf = Vec::new();
+    match fmt {
+        Format::Webp => {
+            let rgb = r.rgb(pal);
+            if image::codecs::webp::WebPEncoder::new_lossless(&mut buf)
+                .encode(&rgb, r.out_w as u32, r.out_h as u32, image::ExtendedColorType::Rgb8)
+                .is_err()
+            {
+                return 0;
+            }
+        }
+        Format::Png => {
+            let levels = r.levels_upscaled();
+            let packed = pack_2bit(&levels, r.out_w, r.out_h);
+            let palette: Vec<u8> = pal.iter().flatten().copied().collect();
+            let mut enc = png::Encoder::new(&mut buf, r.out_w as u32, r.out_h as u32);
+            enc.set_color(png::ColorType::Indexed);
+            enc.set_depth(png::BitDepth::Two);
+            enc.set_palette(palette);
+            enc.set_compression(png::Compression::Best);
+            match enc.write_header() {
+                Ok(mut writer) => {
+                    if writer.write_image_data(&packed).is_ok() {
+                        let _ = writer.finish();
+                    }
+                }
+                Err(_) => return 0,
+            }
+        }
+    }
+    buf.len() as u64
 }
