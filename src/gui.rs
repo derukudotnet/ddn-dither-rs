@@ -11,7 +11,7 @@ use eframe::egui::{self, pos2, vec2, Color32, Rect, Sense, Stroke, TextureHandle
 use ddn_dither::cli::{self, Cli, CropMode, Format, FrameSel};
 use ddn_dither::cropbox::{CropBox, Handle};
 use ddn_dither::frame::Frame;
-use ddn_dither::gray::{Plane, RgbImage};
+use ddn_dither::gray::Plane;
 use ddn_dither::palette::{self, Palette};
 use ddn_dither::pipeline::{self, Fit, Params, Rendered};
 use ddn_dither::resample::{resize_plane, resize_rgb, BoxF};
@@ -66,8 +66,6 @@ struct Source {
     w: usize,
     h: usize,
     gray: Plane,
-    /// Small colour copy (max 256 on the long side) for dominant-colour palette extraction.
-    mini: RgbImage,
     /// Smaller grey copy for fast previews while dragging: (plane, x scale, y scale).
     proxy: Option<(Plane, f64, f64)>,
     tex: TextureHandle,
@@ -283,13 +281,6 @@ impl App {
         };
         let (w, h) = (rgb.w, rgb.h);
         let longest = w.max(h);
-        let mini = if longest > 256 {
-            let s = 256.0 / longest as f64;
-            let (mw, mh) = (((w as f64 * s).round() as usize).max(1), ((h as f64 * s).round() as usize).max(1));
-            resize_rgb(&rgb, mw, mh, BoxF::full(w, h))
-        } else {
-            RgbImage::new(w, h, rgb.data.clone())
-        };
         let gray = rgb.to_gray();
 
         let shown = if longest > DISPLAY_MAX {
@@ -327,7 +318,7 @@ impl App {
         }
 
         self.source_id += 1;
-        self.source = Some(Source { path: path.to_string(), w, h, gray, mini, proxy, tex });
+        self.source = Some(Source { path: path.to_string(), w, h, gray, proxy, tex });
         self.crop = CropBox::max_fit(w as f64, h as f64, self.aspect());
         self.last_aspect = self.aspect();
         self.drag = None;
@@ -812,23 +803,22 @@ impl App {
                 let c = self.crop;
                 let (mut x, mut y, mut w, mut h) = (c.x, c.y, c.w, c.h);
                 let (bx, by, bw, bh) = (x, y, w, h);
-                ui.horizontal(|ui| {
+                let grid = egui::Grid::new("crop_fields").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
                     ui.label("X");
                     ui.add(egui::DragValue::new(&mut x).speed(0.5).range(0.0..=iw));
                     ui.label("Y");
                     ui.add(egui::DragValue::new(&mut y).speed(0.5).range(0.0..=ih));
-                });
-                if (x, y) != (bx, by) {
-                    self.crop = CropBox { x, y, w: c.w, h: c.h }.clamped_position(iw, ih);
-                }
-                ui.horizontal(|ui| {
+                    ui.end_row();
                     ui.label("W");
                     ui.add(egui::DragValue::new(&mut w).speed(0.5).range(1.0..=iw));
                     ui.label("H");
                     ui.add(egui::DragValue::new(&mut h).speed(0.5).range(1.0..=ih));
-                })
-                .response
-                .on_hover_text("Exact crop position and size in source pixels. They follow the box while you drag it; typing or dragging a number moves the box. W or H snaps to the aspect ratio (the one you edit wins), values clamp to the picture. Hold Shift with the arrow keys to nudge by 10.");
+                    ui.end_row();
+                });
+                grid.response.on_hover_text("Exact crop position and size in source pixels. They follow the box while you drag it; typing or dragging a number moves the box. W or H snaps to the aspect ratio (the one you edit wins), values clamp to the picture. Hold Shift with the arrow keys to nudge by 10.");
+                if (x, y) != (bx, by) {
+                    self.crop = CropBox { x, y, w: c.w, h: c.h }.clamped_position(iw, ih);
+                }
                 if (w, h) != (bw, bh) {
                     let min_w = 24.0_f64.min(iw / 4.0);
                     let aspect = self.aspect();
@@ -889,26 +879,6 @@ impl App {
             })
             .response
             .on_hover_text("Recolour any time — changing the palette never re-dithers.");
-        if ui
-            .add_enabled(self.source.is_some(), egui::Button::new("Auto from image"))
-            .on_hover_text("Sample the current crop region and keep its four dominant colours as a custom palette (darkest first), ready to fine-tune in the boxes below.")
-            .clicked()
-        {
-            if let Some((pal, hexes)) = self.source.as_ref().map(|s| {
-                let (sx, sy) = (s.mini.w as f64 / s.w.max(1) as f64, s.mini.h as f64 / s.h.max(1) as f64);
-                let mc = CropBox { x: self.crop.x * sx, y: self.crop.y * sy, w: self.crop.w * sx, h: self.crop.h * sy };
-                let p = dominant_palette(&s.mini, &mc);
-                (
-                    p,
-                    p.iter().map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])).collect::<Vec<_>>().try_into().unwrap_or_else(|_| [(); 4].map(|()| String::new())),
-                )
-            }) {
-                self.pal_idx = custom_idx;
-                self.custom_pal = hexes;
-                self.palette = pal;
-                self.pal_error = None;
-            }
-        }
         if self.pal_idx < custom_idx {
             self.palette = palette::BUILTIN[self.pal_idx].1;
             self.pal_error = None;
@@ -1334,64 +1304,6 @@ fn swatch_strip(ui: &mut egui::Ui, pal: &Palette) {
     }
 }
 
-/// Pick the four dominant colours of the crop region (4-bit-per-channel buckets, largest first),
-/// ordered darkest to lightest. Falls back to a grey ramp when fewer than four buckets exist.
-fn dominant_palette(img: &RgbImage, crop: &CropBox) -> Palette {
-    let x0 = (crop.x.max(0.0) as usize).min(img.w.saturating_sub(1));
-    let y0 = (crop.y.max(0.0) as usize).min(img.h.saturating_sub(1));
-    let x1 = ((crop.x + crop.w) as usize).clamp(x0 + 1, img.w);
-    let y1 = ((crop.y + crop.h) as usize).clamp(y0 + 1, img.h);
-    let step = ((((x1 - x0) * (y1 - y0)) as f64 / 4096.0).sqrt().ceil() as usize).max(1);
-    let mut counts = vec![0u32; 4096];
-    let mut sums = vec![0u64; 3 * 4096];
-    for y in (y0..y1).step_by(step) {
-        for x in (x0..x1).step_by(step) {
-            let i = (y * img.w + x) * 3;
-            let (r, g, b) = (img.data[i] as u32, img.data[i + 1] as u32, img.data[i + 2] as u32);
-            let bin = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
-            counts[bin as usize] += 1;
-            sums[bin as usize * 3] += r as u64;
-            sums[bin as usize * 3 + 1] += g as u64;
-            sums[bin as usize * 3 + 2] += b as u64;
-        }
-    }
-    let lum = |c: &palette::Rgb| 0.2126 * c[0] as f64 + 0.7152 * c[1] as f64 + 0.0722 * c[2] as f64;
-    let mut reps: Vec<palette::Rgb> = (0..4096usize)
-        .filter(|&i| counts[i] > 0)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .map(|i| {
-            let n = counts[i] as u64;
-            [(sums[i * 3] / n) as u8, (sums[i * 3 + 1] / n) as u8, (sums[i * 3 + 2] / n) as u8]
-        })
-        .collect();
-    if reps.len() >= 4 {
-        reps.sort_by(|a, b| counts[bin_of(a)].cmp(&counts[bin_of(b)]));
-        reps.truncate(4);
-    } else {
-        let (lo, hi) = match reps.iter().min_by(|a, b| lum(a).total_cmp(&lum(b))) {
-            Some(dark) => (*dark, *reps.iter().max_by(|a, b| lum(a).total_cmp(&lum(b))).unwrap_or(dark)),
-            None => ([0, 0, 0], [255, 255, 255]),
-        };
-        reps = (0..4)
-            .map(|k| {
-                let t = k as f64 / 3.0;
-                [
-                    (lo[0] as f64 + t * (hi[0] as f64 - lo[0] as f64)).round() as u8,
-                    (lo[1] as f64 + t * (hi[1] as f64 - lo[1] as f64)).round() as u8,
-                    (lo[2] as f64 + t * (hi[2] as f64 - lo[2] as f64)).round() as u8,
-                ]
-            })
-            .collect();
-    }
-    reps.sort_by(|a, b| lum(a).total_cmp(&lum(b)));
-    reps.try_into().unwrap_or([[0, 0, 0]; 4])
-}
-
-fn bin_of(c: &palette::Rgb) -> usize {
-    (((c[0] as usize) >> 4) << 8) | (((c[1] as usize) >> 4) << 4) | ((c[2] as usize) >> 4)
-}
-
 fn split_palette_spec(spec: &str) -> [String; 4] {
     let mut parts: Vec<String> = spec.split(',').map(|s| s.trim().to_string()).collect();
     parts.truncate(4);
@@ -1514,56 +1426,7 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{dominant_palette, snap_pixel_size, CropBox, RgbImage};
-
-    #[test]
-    fn dominant_palette_picks_the_largest_colour_buckets() {
-        let (w, h) = (64usize, 64usize);
-        let mut data = vec![0u8; w * h * 3];
-        let mut fill = |y0: usize, y1: usize, c: [u8; 3]| {
-            for y in y0..y1 {
-                for x in 0..w {
-                    let i = (y * w + x) * 3;
-                    data[i] = c[0];
-                    data[i + 1] = c[1];
-                    data[i + 2] = c[2];
-                }
-            }
-        };
-        fill(0, 26, [255, 0, 0]);
-        fill(26, 45, [0, 0, 255]);
-        fill(45, 58, [255, 255, 255]);
-        fill(58, 64, [0, 0, 0]);
-        let img = RgbImage::new(w, h, data);
-        let pal = dominant_palette(&img, &CropBox { x: 0.0, y: 0.0, w: 64.0, h: 64.0 });
-        assert_eq!(pal, [[0, 0, 0], [0, 0, 255], [255, 0, 0], [255, 255, 255]]);
-    }
-
-    #[test]
-    fn dominant_palette_falls_back_to_a_ramp_for_uniform_images() {
-        let img = RgbImage::new(8, 8, vec![100u8; 8 * 8 * 3]);
-        let pal = dominant_palette(&img, &CropBox { x: 0.0, y: 0.0, w: 8.0, h: 8.0 });
-        assert_eq!(pal[0], [100, 100, 100]);
-        assert_eq!(pal[0], pal[3]);
-    }
-
-    #[test]
-    fn dominant_palette_respects_the_crop_region() {
-        let (wsz, hsz) = (32usize, 32usize);
-        let mut data = vec![255u8; wsz * hsz * 3];
-        for y in 0..8 {
-            for x in 16..24 {
-                let i = (y * wsz + x) * 3;
-                data[i] = 0;
-                data[i + 1] = 0;
-                data[i + 2] = 0;
-            }
-        }
-        let img = RgbImage::new(wsz, hsz, data);
-        let pal = dominant_palette(&img, &CropBox { x: 16.0, y: 0.0, w: 16.0, h: 32.0 });
-        assert_eq!(pal[0], [0, 0, 0]);
-        assert_eq!(pal[3], [255, 255, 255]);
-    }
+    use super::snap_pixel_size;
 
     #[test]
     fn snapping_keeps_valid_pixel_sizes() {
