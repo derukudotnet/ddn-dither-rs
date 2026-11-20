@@ -20,6 +20,8 @@ pub enum Fit {
     Cover(BoxF),
     /// Show the whole image, padded with the darkest level.
     Contain,
+    /// Show the whole image, repeating the outermost pixels outwards to fill.
+    EdgeRepeat,
 }
 
 pub struct Params<'a> {
@@ -96,6 +98,26 @@ fn photo_levels(gray: &Plane, fit: &Fit, gw: usize, gh: usize, ac: bool, contras
                     .copy_from_slice(&small.data[y * fw..(y + 1) * fw]);
             }
             bayer_4tone(&canvas.data, gw, gh)
+        }
+        Fit::EdgeRepeat => {
+            let s = (gw as f64 / gray.w as f64).min(gh as f64 / gray.h as f64);
+            let fw = ((gray.w as f64 * s).round() as usize).clamp(1, gw);
+            let fh = ((gray.h as f64 * s).round() as usize).clamp(1, gh);
+            let mut small = resize_plane(gray, fw, fh, BoxF::full(gray.w, gray.h));
+            if ac {
+                autocontrast(&mut small, DEFAULT_CUTOFF);
+            }
+            contrast(&mut small, contrast_gain);
+            let (ox, oy) = ((gw - fw) / 2, (gh - fh) / 2);
+            let mut canvas = Vec::with_capacity(gw * gh);
+            for y in 0..gh {
+                let sy = y.saturating_sub(oy).min(fh - 1);
+                for x in 0..gw {
+                    let sx = x.saturating_sub(ox).min(fw - 1);
+                    canvas.push(small.data[sy * fw + sx]);
+                }
+            }
+            bayer_4tone(&canvas, gw, gh)
         }
     }
 }
@@ -272,6 +294,24 @@ mod tests {
         assert!(flat.levels.contains(&1));
         base.contrast = 2.0;
         assert!(render(&g, &base).levels.iter().all(|&l| l == 0));
+    }
+
+    #[test]
+    fn edge_repeat_fills_padding_with_edge_pixels() {
+        let g = Plane::filled(200, 100, 255);
+        let p = Params {
+            fit: Fit::EdgeRepeat,
+            out_w: 100,
+            out_h: 100,
+            pixel_size: 1,
+            frame: None,
+            frame_scale: 1,
+            autocontrast: false,
+            contrast: 1.0,
+        };
+        let r = render(&g, &p);
+        assert_eq!(r.levels[0], 3); // top-left is smeared white (not dark padding)
+        assert_eq!(r.levels[50 * 100 + 50], 3); // centre is the (white) photo
     }
 
     #[test]

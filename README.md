@@ -32,7 +32,7 @@ ddn-dither                                # window, drop an image onto it
 ```
 
 `ddn-dither --help` lists everything. Your old options keep working
-(`--output-size`, `--output-width`, `--aspect`, `--crop-mode cover|contain|interactive`,
+(`--output-size`, `--output-width`, `--aspect`, `--crop-mode cover|contain|pad|interactive`,
 `--format`, `--output`); `-s/--internal-scale` is accepted and ignored.
 
 ### Window
@@ -63,7 +63,10 @@ ddn-dither                                # window, drop an image onto it
   app were restarted with the same image, without closing it.
 * **Contrast** slider boosts or softens contrast around mid-grey, on top of auto contrast (1.00 = no change).
 * **Guides** over the crop box: rule-of-thirds lines or a crosshair through the crop centre, to help alignment.
-* **Fit whole image** pads instead of cropping (padding uses the darkest tone).
+* **Fit** chooses how the picture fills the output: **Crop** centre-crops, **Pad** scales the
+  whole picture in and fills the rest with the darkest tone, **Edge pad** fills the rest by
+  repeating the picture's outermost rows and columns (a smeared-out extension of the image
+  border; sometimes it hides dithering seams better than dark padding).
 * Palette: ddn, green, bw, pocket, color, or your own four hex colours (darkest first; 3-digit shorthand like `#0f0` works).
 * Switching palette or recolouring happens instantly — the dithered grid is cached and only recoloured.
 * Every control has a tooltip; hover (or long-press) it for details.

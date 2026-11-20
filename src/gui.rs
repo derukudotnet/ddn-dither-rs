@@ -88,7 +88,7 @@ struct RenderKey {
     scale: usize,
     autocontrast: bool,
     contrast: f64,
-    contain: bool,
+    fit: usize,
     proxy: bool,
     source_id: u64,
 }
@@ -119,7 +119,7 @@ struct App {
     out_w: usize,
     out_h: usize,
     pixel_size: usize,
-    fit_contain: bool,
+    fit_mode: usize,
     autocontrast: bool,
     contrast: f64,
     snap_pixels: bool,
@@ -221,7 +221,7 @@ impl App {
             out_w: 800,
             out_h: 350,
             pixel_size: cli.pixel_size,
-            fit_contain: cli.crop_mode == CropMode::Contain,
+            fit_mode: fit_mode_of(cli.crop_mode),
             autocontrast: cli.autocontrast,
             contrast: cli.contrast,
             snap_pixels: false,
@@ -333,7 +333,11 @@ impl App {
 
     fn params<'a>(&'a self, crop: BoxF) -> Params<'a> {
         Params {
-            fit: if self.fit_contain { Fit::Contain } else { Fit::Cover(crop) },
+            fit: match self.fit_mode {
+                1 => Fit::Contain,
+                2 => Fit::EdgeRepeat,
+                _ => Fit::Cover(crop),
+            },
             out_w: self.out_w,
             out_h: self.out_h,
             pixel_size: self.pixel_size,
@@ -366,7 +370,7 @@ impl App {
             scale: self.frame_scale,
             autocontrast: self.autocontrast,
             contrast: self.contrast,
-            contain: self.fit_contain,
+            fit: self.fit_mode,
             proxy: use_proxy,
             source_id: self.source_id,
         }
@@ -491,7 +495,7 @@ impl App {
         }
         self.pal_error = None;
         self.pixel_size = self.cli.pixel_size;
-        self.fit_contain = self.cli.crop_mode == CropMode::Contain;
+        self.fit_mode = fit_mode_of(self.cli.crop_mode);
         self.autocontrast = self.cli.autocontrast;
         self.contrast = self.cli.contrast;
         self.snap_pixels = false;
@@ -567,7 +571,7 @@ impl App {
             self.open_dialog(ctx);
         }
         if let Some(src) = &self.source {
-            ui.label(format!("{}  ({}×{})", file_name(&src.path), src.w, src.h));
+            ui.add(egui::Label::new(format!("{}  ({}×{})", file_name(&src.path), src.w, src.h)).truncate());
         }
         ui.separator();
 
@@ -619,12 +623,12 @@ impl App {
         let info = self.frame().map(|f| (f.hole.w, f.hole.h, f.w, f.h, f.source_grey_values, f.hole_is_rect));
         let framed = info.is_some();
         if let Some((hole_w, hole_h, fw, fh, greys, hole_is_rect)) = info {
-            ui.label(format!("Window {hole_w}×{hole_h} px, frame {fw}×{fh} px"));
+            ui.add(egui::Label::new(format!("Window {hole_w}×{hole_h} px, frame {fw}×{fh} px")).truncate());
             if greys > 4 {
-                ui.colored_label(Color32::from_rgb(200, 140, 0), format!("Converted from {greys} grey values to 4 tones."));
+                ui.add(egui::Label::new(egui::RichText::new(format!("Converted from {greys} grey values to 4 tones.")).color(Color32::from_rgb(200, 140, 0))).truncate());
             }
             if !hole_is_rect {
-                ui.colored_label(Color32::from_rgb(200, 140, 0), "Window is not a plain rectangle; the photo fills its bounding box.");
+                ui.add(egui::Label::new(egui::RichText::new("Window is not a plain rectangle; the photo fills its bounding box.").color(Color32::from_rgb(200, 140, 0))).truncate());
             }
             ui.add(
                 egui::Slider::new(&mut self.frame_scale, 1..=16)
@@ -633,7 +637,7 @@ impl App {
             )
             .on_hover_text("Integer upscale of the framed image. ×4 makes 640×576 for the built-in frame.");
             let s = self.frame_scale.max(1);
-            ui.label(format!("Output {}×{} px (set by the frame)", fw * s, fh * s));
+            ui.add(egui::Label::new(format!("Output {}×{} px (set by the frame)", fw * s, fh * s)).truncate());
         }
         ui.separator();
 
@@ -722,8 +726,16 @@ impl App {
         {
             self.guides = self.guides.next();
         }
-        ui.checkbox(&mut self.fit_contain, "Fit whole image (pad instead of crop)")
-            .on_hover_text("Scales the whole picture into the output instead of cropping it; the padding uses the darkest tone.");
+        ui.horizontal(|ui| {
+            ui.label("Fit");
+            for (i, name) in ["Crop", "Pad", "Edge pad"].iter().enumerate() {
+                if ui.selectable_label(self.fit_mode == i, *name).clicked() {
+                    self.fit_mode = i;
+                }
+            }
+        })
+        .response
+        .on_hover_text("How the picture fills the output. Crop: centre-crop to the output aspect. Pad: scale the whole picture in and fill the rest with the darkest tone. Edge pad: fill the rest by repeating the picture's outermost rows and columns, so the image looks smeared out to the edges.");
         ui.separator();
 
         // ---- contrast
@@ -831,10 +843,10 @@ impl App {
                 Some(p) => p.clone(),
                 None => cli::default_output(&self.source.as_ref().map(|s| s.path.clone()).unwrap_or_default(), self.format),
             };
-            ui.weak(format!("→ {}", file_name(&dest)));
+            ui.add(egui::Label::new(egui::RichText::new(format!("→ {}", file_name(&dest))).weak()).truncate());
         }
         ui.separator();
-        ui.label(&self.status);
+        ui.add(egui::Label::new(self.status.as_str()).truncate());
         ui.add_space(6.0);
         let hint = if self.dnd_native_wayland {
             "Drag inside the box to move it; drag a handle to resize (opposite side stays put). Esc closes."
@@ -880,7 +892,7 @@ impl App {
         let to_img = |p: egui::Pos2| ((p.x - img_rect.min.x) as f64 / scale, (p.y - img_rect.min.y) as f64 / scale);
         let to_screen = |x: f64, y: f64| pos2(img_rect.min.x + (x * scale) as f32, img_rect.min.y + (y * scale) as f32);
 
-        if !self.fit_contain {
+        if self.fit_mode == 0 {
             // ---- interaction
             let tol = 10.0 / scale;
             let aspect = self.aspect();
@@ -1107,6 +1119,14 @@ fn human_size(n: u64) -> String {
     }
 }
 
+fn fit_mode_of(mode: CropMode) -> usize {
+    match mode {
+        CropMode::Contain => 1,
+        CropMode::PadRepeat => 2,
+        CropMode::Cover | CropMode::Interactive => 0,
+    }
+}
+
 /// Dropdown section order: built-ins first, folder groups in between, Custom last.
 fn group_rank(g: &str) -> usize {
     match g {
@@ -1150,9 +1170,12 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
-        egui::SidePanel::right("options").min_width(300.0).default_width(320.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.options_ui(ui, ctx));
-        });
+        egui::SidePanel::right("options")
+            .width_range(300.0..=520.0)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.options_ui(ui, ctx));
+            });
         egui::CentralPanel::default().show(ctx, |ui| self.main_ui(ui, ctx));
 
         self.sync_crop_aspect();

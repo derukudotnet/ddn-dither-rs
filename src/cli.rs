@@ -16,7 +16,8 @@ OPTIONS:
     -o, --output-size WxH     Output size, e.g. 800x350 (a single number sets the width)
         --output-width W      Output width; height follows --aspect or the image
     -a, --aspect RATIO        W:H, W/H or a number (21:9, 16/9, 2.33)
-        --crop-mode MODE      cover (centre crop, default), contain (pad), interactive (window)
+        --crop-mode MODE      cover (centre crop, default), contain (pad), pad (repeat
+                              edge pixels to fill), interactive (window)
     -p, --palette SPEC        ddn (default), green, bw, pocket, color, or four hex colours
                               darkest first, e.g. '#0f0f0f,#4a4a4a,#868686,#c1c1c1'
                               (3-digit shorthand like '#0f0' works)
@@ -43,6 +44,7 @@ Old Python options: -s/--internal-scale is accepted but ignored (use --pixel-siz
 pub enum CropMode {
     Cover,
     Contain,
+    PadRepeat,
     Interactive,
 }
 
@@ -199,8 +201,9 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
                 c.crop_mode = match value(&key)?.as_str() {
                     "cover" => CropMode::Cover,
                     "contain" => CropMode::Contain,
+                    "pad" => CropMode::PadRepeat,
                     "interactive" => CropMode::Interactive,
-                    other => return Err(format!("unknown crop mode '{other}' (cover, contain, interactive)")),
+                    other => return Err(format!("unknown crop mode '{other}' (cover, contain, pad, interactive)")),
                 }
             }
             "-p" | "--palette" => {
@@ -289,6 +292,12 @@ mod tests {
         assert_eq!(c.output_size, Some((800, Some(350))));
         assert_eq!(c.crop_mode, CropMode::Interactive);
         assert_eq!(c.inputs, vec!["input.jpg"]);
+    }
+
+    #[test]
+    fn pad_crop_mode_parses() {
+        let c = parse(&a(&["--crop-mode", "pad", "input.jpg"])).unwrap();
+        assert_eq!(c.crop_mode, CropMode::PadRepeat);
     }
 
     #[test]
