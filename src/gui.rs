@@ -1017,14 +1017,16 @@ impl App {
             .preview
             .as_ref()
             .map(|pv| format!("{0}×{1} px · {2}×{3} grid ×{4}", pv.out.0, pv.out.1, pv.grid.0, pv.grid.1, pv.scale));
+        let mut header = "Preview".to_string();
+        if let Some(info) = &pv_info {
+            header.push_str(" · ");
+            header.push_str(info);
+        }
+        if let Some(b) = pv_bytes {
+            header.push_str(&format!(" · {}", human_size(b)));
+        }
         ui.horizontal(|ui| {
-            ui.weak("Preview");
-            if let Some(info) = &pv_info {
-                ui.weak(format!("· {info}"));
-            }
-            if let Some(b) = pv_bytes {
-                ui.weak(format!("· {}", human_size(b)));
-            }
+            ui.weak(header.as_str());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .selectable_label(self.preview_zoom.is_none(), "Fit")
