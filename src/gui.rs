@@ -122,6 +122,8 @@ struct App {
     fit_mode: usize,
     autocontrast: bool,
     gamma: f64,
+    /// Leftover wheel points on the gamma slider, spent in 0.05 steps once a full line is reached.
+    gamma_wheel_acc: f32,
     snap_pixels: bool,
     guides: Guides,
     format: Format,
@@ -239,6 +241,7 @@ impl App {
             fit_mode: fit_mode_of(cli.crop_mode),
             autocontrast: cli.autocontrast,
             gamma: cli.gamma,
+            gamma_wheel_acc: 0.0,
             snap_pixels: false,
             guides: Guides::Thirds,
             format: cli.format,
@@ -854,17 +857,34 @@ impl App {
             .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
         ui.horizontal(|ui| {
             ui.label("Gamma");
-            ui.add(
+            let sresp = ui.add(
                 egui::Slider::new(&mut self.gamma, 0.25..=4.0)
+                    .step_by(0.05)
                     .custom_formatter(|n, _| format!("{n:.2}"))
                     .custom_parser(|s| s.trim().parse::<f64>().ok()),
             );
+            if sresp.hovered() {
+                let dy = ui.input(|i| i.raw_scroll_delta.y);
+                if dy != 0.0 {
+                    self.gamma_wheel_acc += dy;
+                    let steps = (self.gamma_wheel_acc / 8.0).trunc() as f64;
+                    if steps != 0.0 {
+                        self.gamma_wheel_acc -= (steps * 8.0) as f32;
+                        self.gamma = (self.gamma + steps * 0.05).clamp(0.25, 4.0);
+                        self.gamma = (self.gamma / 0.05).round() * 0.05;
+                    }
+                    ui.input_mut(|i| {
+                        i.raw_scroll_delta = egui::Vec2::ZERO;
+                        i.smooth_scroll_delta = egui::Vec2::ZERO;
+                    });
+                }
+            }
             if ui.small_button("Reset").on_hover_text("Back to no gamma (1.00)").clicked() {
                 self.gamma = 1.0;
             }
         })
         .response
-        .on_hover_text("Gamma curve before the auto-contrast stretch, so the shape survives the stretch. Below 1.00 brightens shadows and midtones (0.50 turns a 25% grey into 50%), above 1.00 darkens. 1.00 = no change.");
+        .on_hover_text("Gamma curve before the auto-contrast stretch, so the shape survives the stretch. Below 1.00 brightens shadows and midtones (0.50 turns a 25% grey into 50%), above 1.00 darkens. 1.00 = no change. Arrow keys, mouse wheel over the box or dragging all move in 0.05 steps.");
         ui.separator();
 
         // ---- palette
