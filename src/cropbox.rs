@@ -68,6 +68,17 @@ impl CropBox {
         CropBox { x: cx - w / 2.0, y: cy - h / 2.0, w, h }.clamped_position(img_w, img_h)
     }
 
+    /// Scale the box about its centre by `factor`, keeping `aspect`, clamped to the image
+    /// (and to a minimum width, like a handle drag).
+    pub fn zoomed(&self, factor: f64, aspect: f64, img_w: f64, img_h: f64, min_w: f64) -> CropBox {
+        let (maxw, maxh) = max_size(img_w, img_h, aspect);
+        let max_w = maxw.min(maxh * aspect);
+        let w = (self.w * factor).clamp(min_w.max(1.0), max_w);
+        let h = w / aspect;
+        let (cx, cy) = self.center();
+        CropBox { x: cx - w / 2.0, y: cy - h / 2.0, w, h }.clamped_position(img_w, img_h)
+    }
+
     /// Slide the box inside the image without changing its size.
     pub fn clamped_position(mut self, img_w: f64, img_h: f64) -> CropBox {
         self.x = self.x.clamp(0.0, (img_w - self.w).max(0.0));
@@ -213,6 +224,44 @@ mod tests {
         assert!(b.x >= -1e-9 && b.y >= -1e-9, "outside: {b:?}");
         assert!(b.right() <= IW + 1e-9 && b.bottom() <= IH + 1e-9, "outside: {b:?}");
         assert!(b.w >= 1.0 - 1e-9);
+    }
+
+    #[test]
+    fn zoom_keeps_the_centre_when_it_fits() {
+        let b = CropBox { x: 100.0, y: 100.0, w: 400.0, h: 400.0 / A };
+        let z = b.zoomed(1.5, A, IW, IH, 24.0);
+        check(&z);
+        let (c0, c1) = (b.center(), z.center());
+        assert!((c0.0 - c1.0).abs() < 1e-9 && (c0.1 - c1.1).abs() < 1e-9, "centre moved");
+        assert!((z.w - b.w * 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zoom_shrinks_only_down_to_the_minimum_width() {
+        let b = CropBox { x: 100.0, y: 100.0, w: 400.0, h: 400.0 / A };
+        let z = b.zoomed(0.01, A, IW, IH, 24.0);
+        check(&z);
+        assert!((z.w - 24.0).abs() < 1e-9);
+        let (c0, c1) = (b.center(), z.center());
+        assert!((c0.0 - c1.0).abs() < 1e-9 && (c0.1 - c1.1).abs() < 1e-9, "centre moved");
+    }
+
+    #[test]
+    fn zoom_clamps_to_the_largest_fit() {
+        let b = CropBox::max_fit(IW, IH, A);
+        let z = b.zoomed(5.0, A, IW, IH, 24.0);
+        check(&z);
+        let (maxw, maxh) = max_size(IW, IH, A);
+        assert!((z.w - maxw.min(maxh * A)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zoom_of_a_small_box_in_a_tiny_image_stays_inside() {
+        let b = CropBox { x: 1.0, y: 1.0, w: 10.0, h: 10.0 / A };
+        let z = b.zoomed(3.0, A, 40.0, 40.0, 24.0);
+        assert!((z.w / z.h - A).abs() < 1e-9, "aspect broken: {z:?}");
+        assert!(z.x >= -1e-9 && z.y >= -1e-9);
+        assert!(z.right() <= 40.0 + 1e-9 && z.bottom() <= 40.0 + 1e-9);
     }
 
     #[test]

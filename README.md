@@ -37,8 +37,9 @@ ddn-dither                                # window, drop an image onto it
 
 ### Window
 
-* Drop an image anywhere, or **Open image…**. Drag inside the box to move it; drag a handle to
-  resize (the opposite corner/side stays fixed, aspect ratio is kept).
+* Drop an image anywhere, or **Open image….** Drag inside the box to move it; drag a handle
+  to resize (the opposite corner/side stays fixed, aspect ratio is kept); scroll the wheel
+  over the box to grow or shrink it about its centre.
 * There is no save-on-Enter shortcut; saving always happens through the **Save** buttons, so an
   accidental keypress can never silently overwrite a file. When started from the command line
   with a file, **Save & quit** saves and closes the window; Esc always closes it.

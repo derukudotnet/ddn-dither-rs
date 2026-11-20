@@ -864,9 +864,9 @@ impl App {
         ui.add(egui::Label::new(self.status.as_str()).truncate());
         ui.add_space(6.0);
         let hint = if self.dnd_native_wayland {
-            "Drag inside the box to move it; drag a handle to resize (opposite side stays put). Esc closes."
+            "Drag inside the box to move it; drag a handle to resize; scroll the wheel over the box to grow or shrink it (opposite sides and the aspect stay put). Esc closes."
         } else {
-            "Drag inside the box to move it; drag a handle to resize (opposite side stays put). Drop another image anywhere to switch. Esc closes."
+            "Drag inside the box to move it; drag a handle to resize; scroll the wheel over the box to grow or shrink it (opposite sides and the aspect stay put). Drop another image anywhere to switch. Esc closes."
         };
         ui.weak(hint);
         ui.add_space(10.0);
@@ -919,6 +919,10 @@ impl App {
                     if let Some(h) = self.crop.hit(ix, iy, tol) {
                         ctx.set_cursor_icon(cursor_for(h, false));
                     }
+                    let dz = ctx.input(|i| i.raw_scroll_delta.y);
+                    if dz != 0.0 && self.crop.hit(ix, iy, 0.0).is_some() {
+                        self.crop = self.crop.zoomed((dz as f64 / 250.0).exp(), aspect, iw, ih, min_w);
+                    }
                 }
             }
             if resp.drag_started() {
@@ -944,18 +948,10 @@ impl App {
             let cb = self.crop;
             let crop_rect = Rect::from_min_max(to_screen(cb.x, cb.y), to_screen(cb.right(), cb.bottom()));
             let dim = Color32::from_black_alpha(140);
-            painter.rect_filled(Rect::from_min_max(img_rect.min, pos2(img_rect.max.x, crop_rect.min.y)), 0.0, dim);
-            painter.rect_filled(Rect::from_min_max(pos2(img_rect.min.x, crop_rect.max.y), img_rect.max), 0.0, dim);
-            painter.rect_filled(
-                Rect::from_min_max(pos2(img_rect.min.x, crop_rect.min.y), pos2(crop_rect.min.x, crop_rect.max.y)),
-                0.0,
-                dim,
-            );
-            painter.rect_filled(
-                Rect::from_min_max(pos2(crop_rect.max.x, crop_rect.min.y), pos2(img_rect.max.x, crop_rect.max.y)),
-                0.0,
-                dim,
-            );
+            painter.rect_filled(img_rect, 0.0, dim);
+            painter
+                .with_clip_rect(crop_rect)
+                .image(tex_id, img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             painter.rect_stroke(crop_rect, 0.0, Stroke::new(2.0_f32, Color32::WHITE));
             let c = crop_rect.center();
             for p in [
