@@ -804,6 +804,7 @@ impl App {
                 let (mut x, mut y, mut w, mut h) = (c.x, c.y, c.w, c.h);
                 let (bx, by, bw, bh) = (x, y, w, h);
                 let grid = egui::Grid::new("crop_fields").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
+                    ui.spacing_mut().interact_size.x = 64.0;
                     ui.label("X");
                     ui.add(egui::DragValue::new(&mut x).speed(0.5).range(0.0..=iw));
                     ui.label("Y");
