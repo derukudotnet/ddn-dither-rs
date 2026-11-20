@@ -136,6 +136,8 @@ struct App {
     /// None = fit into the pane; Some(z) = z screen pixels per output pixel (1.0 = 100%).
     preview_zoom: Option<f32>,
     pv_pan: (f32, f32),
+    /// Effective fit scale of the preview, for the toolbar indicator (updated each frame).
+    pv_fit: f32,
 
     output_override: Option<String>,
     exit_on_save: bool,
@@ -231,6 +233,7 @@ impl App {
             last_key: None,
             preview_zoom: None,
             pv_pan: (0.0, 0.0),
+            pv_fit: 1.0,
             output_override: cli.output.clone(),
             exit_on_save: !cli.inputs.is_empty(),
             status,
@@ -447,6 +450,51 @@ impl App {
         if let Some(path) = dialog.save_file() {
             self.save_to(&path.to_string_lossy());
         }
+    }
+
+    fn reset_settings(&mut self) {
+        self.frame_idx = match &self.cli.frame {
+            FrameSel::None => None,
+            FrameSel::Builtin => Some(0),
+            FrameSel::Name(id) => Frame::builtin_named(id).and_then(|f| self.frames.iter().position(|g| g.name == f.name)),
+            FrameSel::Path(p) => {
+                let stem = Path::new(p).file_stem().and_then(|n| n.to_str()).unwrap_or(p);
+                self.frames.iter().position(|g| g.name == stem)
+            }
+        };
+        if let Some(pi) = palette::by_name(&self.cli.palette) {
+            self.pal_idx = palette::names().iter().position(|n| *n == self.cli.palette.to_ascii_lowercase()).unwrap_or(0);
+            self.custom_pal_text = String::new();
+            self.palette = pi;
+        } else {
+            self.pal_idx = palette::BUILTIN.len();
+            self.custom_pal_text = self.cli.palette.clone();
+            self.palette = palette::resolve(&self.cli.palette).unwrap_or(palette::BUILTIN[0].1);
+        }
+        self.pal_error = None;
+        self.pixel_size = self.cli.pixel_size;
+        self.fit_contain = self.cli.crop_mode == CropMode::Contain;
+        self.autocontrast = self.cli.autocontrast;
+        self.contrast = self.cli.contrast;
+        self.frame_scale = self.cli.scale;
+        self.format = self.cli.format;
+        self.guides = Guides::Thirds;
+        if let Some(src) = &self.source {
+            let (ow, oh) = cli::resolve_size(&self.cli, src.w, src.h);
+            self.out_w = ow;
+            self.out_h = oh;
+            let a = ow as f64 / oh as f64;
+            self.aspect_idx = ASPECT_PRESETS.iter().position(|(_, p)| *p > 0.0 && (p - a).abs() < 0.002).unwrap_or(0);
+            self.last_aspect = self.aspect();
+            self.crop = CropBox::max_fit(src.w as f64, src.h as f64, self.aspect());
+        } else {
+            self.out_w = 800;
+            self.out_h = 350;
+            self.aspect_idx = 0;
+        }
+        self.drag = None;
+        self.last_key = None;
+        self.status = "Settings reset to startup values.".to_string();
     }
 
     fn open_dialog(&mut self, ctx: &egui::Context) {
@@ -713,6 +761,14 @@ impl App {
             };
             ui.weak(format!("→ {}", file_name(&dest)));
         }
+        ui.add_space(4.0);
+        if ui
+            .small_button("Reset all settings")
+            .on_hover_text("Return every option to its startup value: size, pixel size, contrast, frame selection and scale, palette, crop box.")
+            .clicked()
+        {
+            self.reset_settings();
+        }
         ui.separator();
         ui.label(&self.status);
         ui.add_space(6.0);
@@ -875,6 +931,8 @@ impl App {
                 }
                 if let Some(z) = self.preview_zoom {
                     ui.weak(format!("{:.0}%", z * 100.0));
+                } else {
+                    ui.weak(format!("Fit · {:.0}%", self.pv_fit * 100.0));
                 }
             });
         })
@@ -896,6 +954,7 @@ impl App {
                 }
                 Some(z) => z,
             };
+            self.pv_fit = s;
             let ov = (
                 ((nw * s - pv_rect.width()) / 2.0).max(0.0),
                 ((nh * s - pv_rect.height()) / 2.0).max(0.0),

@@ -48,10 +48,15 @@ ddn-dither                                # window, drop an image onto it
 * **Pixel size** slider = output pixels per dithered pixel (whole numbers → crisp, even blocks).
   *auto* aims for about 384 dithered pixels across; the row shows the resulting grid size if you
   want to match the Camera's authentic 128×112 photo grid.
-* **Preview zoom**: Fit / 100% buttons above the preview. Mouse wheel zooms at the pointer,
-  dragging pans (grab cursor), double-click returns to Fit. Zoom and pan survive re-renders, so
-  you can change pixel size and compare on exactly the same spot. At 100% the preview is
-  pixel-for-pixel what the saved file contains — no need to save-and-check to judge the result.
+* **Preview zoom**: Fit / 100% buttons above the preview, with the current zoom shown next to
+  them (in Fit mode you see the effective scale, e.g. `Fit · 87%`). Mouse wheel zooms at the
+  pointer, dragging pans (grab cursor), double-click returns to Fit. Zoom and pan survive
+  re-renders, so you can change pixel size and compare on exactly the same spot. At 100% the
+  preview is pixel-for-pixel what the saved file contains — no need to save-and-check to judge
+  the result.
+* **Reset all settings** (bottom of the sidebar) returns every option to its startup value —
+  size, pixel size, contrast, frame selection and scale, palette, and the crop box — as if the
+  app were restarted with the same image, without closing it.
 * **Contrast** slider boosts or softens contrast around mid-grey, on top of auto contrast (1.00 = no change).
 * **Guides** over the crop box: rule-of-thirds lines or a crosshair through the crop centre, to help alignment.
 * **Fit whole image** pads instead of cropping (padding uses the darkest tone).
