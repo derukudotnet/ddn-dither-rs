@@ -75,7 +75,8 @@ A frame is a PNG with a transparent rectangular window. Like the real Game Boy C
 it uses **four grey levels**; the palette then recolours frame and photo together. A frame that
 has more greys is converted to four tones on load (with the same thresholds as the dither step)
 and the window tells you. Frame names are shown prettified in the dropdown (`film_roll`
-becomes "Film Roll"); frame ids stay as-is for `--frame`.
+becomes "Film Roll"); frame ids stay as-is for `--frame`. The dropdown groups frames by
+size: 160×144 (Game Boy Camera), 160×224 (wild), everything else under "Other sizes".
 
 * Built in: the Deruku frame (160×144, 128×112 window).
 

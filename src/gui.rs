@@ -554,15 +554,40 @@ impl App {
             .selected_text(self.frame().map(|f| pretty_frame_name(&f.name)).unwrap_or_else(|| "None".to_string()))
             .width(220.0)
             .show_ui(ui, |ui| {
+                ui.set_min_width(200.0);
                 ui.selectable_value(&mut self.frame_idx, None, "None");
-                for i in 0..self.frames.len() {
-                    let name = pretty_frame_name(&self.frames[i].name);
-                    ui.selectable_value(&mut self.frame_idx, Some(i), name);
+                let groups: [( &str, (usize, usize)); 2] =
+                    [("Game Boy Camera", (160, 144)), ("Wild frames", (160, 224))];
+                let mut rest: Vec<usize> = (0..self.frames.len()).collect();
+                for (label, size) in groups {
+                    let members: Vec<usize> = rest
+                        .iter()
+                        .copied()
+                        .filter(|&i| (self.frames[i].w, self.frames[i].h) == size)
+                        .collect();
+                    if members.is_empty() {
+                        continue;
+                    }
+                    rest.retain(|i| !members.contains(i));
+                    ui.separator();
+                    ui.strong(label);
+                    for i in members {
+                        let name = pretty_frame_name(&self.frames[i].name);
+                        ui.selectable_value(&mut self.frame_idx, Some(i), name);
+                    }
+                }
+                if !rest.is_empty() {
+                    ui.separator();
+                    ui.strong("Other sizes");
+                    for i in rest {
+                        let name = pretty_frame_name(&self.frames[i].name);
+                        ui.selectable_value(&mut self.frame_idx, Some(i), name);
+                    }
                 }
             })
             .response
             .on_hover_text(
-                "A frame is four-tone art with a transparent window for the photo. It sets the output size and locks the crop to the window's aspect.",
+                "A frame is four-tone art with a transparent window for the photo. It sets the output size and locks the crop to the window's aspect. Frames are grouped by size: 160\u{d7}144 (Game Boy Camera), 160\u{d7}224 (wild), everything else.",
             );
         if ui
             .small_button("Load frame file…")
