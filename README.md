@@ -67,6 +67,10 @@ ddn-dither                                # window, drop an image onto it
 * **Reset all settings** (bottom of the sidebar) returns every option to its startup value —
   size, pixel size, contrast, frame selection and scale, palette, and the crop box — as if the
   app were restarted with the same image, without closing it.
+* **Copy command line** puts a `ddn-dither …` command with the current size, pixel size, fit
+  mode, contrast, format, palette and frame onto the clipboard, so a render can be reproduced
+  (or batched) exactly in a script. The crop position itself is chosen in the window, so the
+  command uses the default centre-crop.
 * **Contrast** slider boosts or softens contrast around mid-grey, on top of auto contrast (1.00 = no change).
 * **Guides** over the crop box: rule-of-thirds lines or a crosshair through the crop centre, to help alignment.
 * **Fit** chooses how the picture fills the output: **Crop** centre-crops, **Pad** scales the

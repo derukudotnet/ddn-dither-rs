@@ -522,6 +522,47 @@ impl App {
         self.status = "Settings reset to startup values.".to_string();
     }
 
+    /// A command line that re-renders the current image with the current settings.
+    /// The crop position is decided interactively in the window, so it is not part of it.
+    fn cli_command(&self) -> String {
+        let input = self.source.as_ref().map(|s| s.path.clone()).unwrap_or_else(|| "input.png".to_string());
+        let mut cmd = format!("ddn-dither {input}");
+        match self.frame() {
+            Some(f) => {
+                cmd.push_str(&format!(" --frame {}", f.name));
+                if self.frame_scale != 4 {
+                    cmd.push_str(&format!(" --scale {}", self.frame_scale));
+                }
+            }
+            None => {
+                cmd.push_str(&format!(" -o {}x{}", self.out_w, self.out_h));
+                if self.pixel_size != 0 {
+                    cmd.push_str(&format!(" --pixel-size {}", self.pixel_size));
+                }
+                match self.fit_mode {
+                    1 => cmd.push_str(" --crop-mode contain"),
+                    2 => cmd.push_str(" --crop-mode pad"),
+                    _ => {}
+                }
+            }
+        }
+        if !self.autocontrast {
+            cmd.push_str(" --no-autocontrast");
+        }
+        if (self.contrast - 1.0).abs() > 1e-9 {
+            cmd.push_str(&format!(" --contrast {}", self.contrast));
+        }
+        if self.format != Format::Png {
+            cmd.push_str(" --format webp");
+        }
+        if self.pal_idx < palette::names().len() {
+            cmd.push_str(&format!(" -p {}", palette::BUILTIN[self.pal_idx].0));
+        } else {
+            cmd.push_str(&format!(" -p {}", self.custom_pal.join(",")));
+        }
+        cmd
+    }
+
     /// With integer scaling on, keep the output size exactly as set and instead snap the
     /// pixel size to the nearest value that divides both sides, so every dither block is a
     /// whole, uncropped N x N and the resolution the user asked for is preserved.
@@ -930,6 +971,14 @@ impl App {
                 self.save_as();
             }
         });
+        if ui
+            .button("Copy command line")
+            .on_hover_text("Puts a command line with the current size, pixel size, fit mode, contrast, format, palette and frame onto the clipboard, so the current render can be reproduced in a script. The crop position itself is chosen in the window, so the command crops to the output aspect instead.")
+            .clicked()
+        {
+            ctx.copy_text(self.cli_command());
+            self.status = "Command line copied.".to_string();
+        }
         if have {
             let dest = match &self.output_override {
                 Some(p) => p.clone(),
