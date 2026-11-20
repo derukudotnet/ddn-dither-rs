@@ -347,7 +347,7 @@ mod tests {
     fn mask_only_changes_the_painted_area() {
         let gray = Plane::filled(8, 8, 96);
         let mut mask = Plane::filled(8, 8, 0);
-        dab(&mut mask, 6.0, 6.0, 1.5);
+        dab(&mut mask, 6.0, 6.0, 1.5, 0.5);
         let common = Params {
             fit: Fit::Cover(BoxF::full(8, 8)),
             out_w: 8,

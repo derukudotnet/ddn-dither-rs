@@ -25,6 +25,11 @@ const PROXY_MAX: usize = 1200;
 const DISPLAY_MAX: usize = 2048;
 /// Brush gamma that fresh paint starts with (brightens, the common touch-up case).
 const BRUSH_GAMMA_DEFAULT: f64 = 0.5;
+/// Brush softness on load, as a percentage of the radius spent feathering.
+const BRUSH_SOFT_DEFAULT: f64 = 50.0;
+/// Slider range shared by the global and the brush gamma (log-symmetrical around 1.00).
+const GAMMA_MIN: f64 = 0.5;
+const GAMMA_MAX: f64 = 2.0;
 /// Longest side of the tint texture used to show painted areas.
 const MASK_TINT_MAX: usize = 512;
 
@@ -138,7 +143,7 @@ struct App {
     autocontrast: bool,
     gamma: f64,
     /// Leftover wheel points on the gamma slider, spent in 0.05 steps once a full line is reached.
-    gamma_wheel_acc: f32,
+    gamma_wheel_acc: f64,
     snap_pixels: bool,
     guides: Guides,
     format: Format,
@@ -146,6 +151,10 @@ struct App {
     tool: Tool,
     /// Brush radius in source pixels; wheel over the photo changes it.
     brush_r: f64,
+    /// Feathering of the dab rim as a percentage of the radius (0 = hard circle).
+    brush_soft: f64,
+    /// Leftover wheel points on the brush gamma slider.
+    brush_wheel_acc: f64,
     /// Painted coverage at source resolution; `None` until the first dab.
     mask: Option<Plane>,
     /// Bumped on every mutation of `mask` so the preview re-renders.
@@ -276,6 +285,8 @@ impl App {
             guides: Guides::Thirds,
             tool: Tool::Crop,
             brush_r: 24.0,
+            brush_soft: BRUSH_SOFT_DEFAULT,
+            brush_wheel_acc: 0.0,
             mask: None,
             mask_version: 0,
             mask_view: None,
@@ -418,9 +429,10 @@ impl App {
         let Some(src) = self.source.as_ref() else { return };
         let (w, h) = (src.w, src.h);
         let m = self.mask.get_or_insert_with(|| Plane::new(w, h, vec![0; w * h]));
+        let soft = (self.brush_soft / 100.0).clamp(0.0, 0.95);
         match self.tool {
-            Tool::Paint => mask::dab(m, x, y, self.brush_r),
-            Tool::Erase => mask::erase(m, x, y, self.brush_r),
+            Tool::Paint => mask::dab(m, x, y, self.brush_r, soft),
+            Tool::Erase => mask::erase(m, x, y, self.brush_r, soft),
             Tool::Crop => {}
         }
         self.mask_version += 1;
@@ -629,6 +641,7 @@ impl App {
         self.guides = Guides::Thirds;
         self.tool = Tool::Crop;
         self.mask_gamma = BRUSH_GAMMA_DEFAULT;
+        self.brush_soft = BRUSH_SOFT_DEFAULT;
         self.stroke = None;
         if self.mask.take().is_some() {
             self.mask_version += 1;
@@ -997,18 +1010,29 @@ impl App {
         if self.tool != Tool::Crop {
             ui.horizontal(|ui| {
                 ui.label("Gamma");
-                ui.add(
-                    egui::Slider::new(&mut self.mask_gamma, 0.25..=4.0)
+                let sresp = ui.add(
+                    egui::Slider::new(&mut self.mask_gamma, GAMMA_MIN..=GAMMA_MAX)
                         .step_by(0.05)
                         .custom_formatter(|n, _| format!("{n:.2}"))
                         .custom_parser(|s| s.trim().parse::<f64>().ok()),
                 );
+                wheel_step(ui, &sresp, &mut self.brush_wheel_acc, &mut self.mask_gamma, GAMMA_MIN, GAMMA_MAX, 0.05);
                 if ui.small_button("Reset").on_hover_text("Back to the starting strength").clicked() {
                     self.mask_gamma = BRUSH_GAMMA_DEFAULT;
                 }
             })
             .response
-            .on_hover_text("Curve applied where you painted, before the contrast stretch. Below 1.00 brightens, above 1.00 darkens. Drag or scroll over the picture while a tool is active.");
+            .on_hover_text("Curve applied where you painted, before the contrast stretch. Below 1.00 brightens, above 1.00 darkens. Arrow keys, mouse wheel over the box or dragging all move in 0.05 steps.");
+            ui.horizontal(|ui| {
+                ui.label("Softness");
+                ui.add(
+                    egui::Slider::new(&mut self.brush_soft, 0.0..=95.0)
+                        .step_by(5.0)
+                        .suffix("%"),
+                );
+            })
+            .response
+            .on_hover_text("Feathering of the brush edge, as a percentage of the brush radius: 0% is a hard circle, 50% feather over the outer half, higher blends even wider so the painted area fades into the picture.");
             ui.weak(format!(
                 "Brush {} px on a {}x{} picture - mouse wheel changes it",
                 self.brush_r.round() as i64,
@@ -1025,27 +1049,12 @@ impl App {
         ui.horizontal(|ui| {
             ui.label("Gamma");
             let sresp = ui.add(
-                egui::Slider::new(&mut self.gamma, 0.25..=4.0)
+                egui::Slider::new(&mut self.gamma, GAMMA_MIN..=GAMMA_MAX)
                     .step_by(0.05)
                     .custom_formatter(|n, _| format!("{n:.2}"))
                     .custom_parser(|s| s.trim().parse::<f64>().ok()),
             );
-            if sresp.hovered() {
-                let dy = ui.input(|i| i.raw_scroll_delta.y);
-                if dy != 0.0 {
-                    self.gamma_wheel_acc += dy;
-                    let steps = (self.gamma_wheel_acc / 8.0).trunc() as f64;
-                    if steps != 0.0 {
-                        self.gamma_wheel_acc -= (steps * 8.0) as f32;
-                        self.gamma = (self.gamma + steps * 0.05).clamp(0.25, 4.0);
-                        self.gamma = (self.gamma / 0.05).round() * 0.05;
-                    }
-                    ui.input_mut(|i| {
-                        i.raw_scroll_delta = egui::Vec2::ZERO;
-                        i.smooth_scroll_delta = egui::Vec2::ZERO;
-                    });
-                }
-            }
+            wheel_step(ui, &sresp, &mut self.gamma_wheel_acc, &mut self.gamma, GAMMA_MIN, GAMMA_MAX, 0.05);
             if ui.small_button("Reset").on_hover_text("Back to no gamma (1.00)").clicked() {
                 self.gamma = 1.0;
             }
@@ -1529,6 +1538,28 @@ impl App {
             let p = ui.painter_at(pv_rect);
             p.image(tex_id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
+    }
+}
+
+/// Step `value` in `step` increments from wheel input while `resp` is hovered, snapping to the
+/// step grid, clamping to `[min, max]` and consuming the scroll so the sidebar does not scroll.
+fn wheel_step(ui: &mut egui::Ui, resp: &egui::Response, acc: &mut f64, value: &mut f64, min: f64, max: f64, step: f64) {
+    if !resp.hovered() {
+        return;
+    }
+    let dy = ui.input(|i| i.raw_scroll_delta.y);
+    if dy != 0.0 {
+        *acc += dy as f64;
+        let steps = (*acc / 8.0).trunc();
+        if steps != 0.0 {
+            *acc -= steps * 8.0;
+            *value = (*value + steps * step).clamp(min, max);
+            *value = (*value / step).round() * step;
+        }
+        ui.input_mut(|i| {
+            i.raw_scroll_delta = egui::Vec2::ZERO;
+            i.smooth_scroll_delta = egui::Vec2::ZERO;
+        });
     }
 }
 
