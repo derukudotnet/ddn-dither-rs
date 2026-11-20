@@ -8,6 +8,7 @@ use crate::autocontrast::{autocontrast, gamma, DEFAULT_CUTOFF};
 use crate::dither::bayer_4tone;
 use crate::frame::Frame;
 use crate::gray::Plane;
+use crate::mask;
 use crate::palette::Palette;
 use crate::resample::{resize_plane, upscale_nearest, BoxF};
 
@@ -37,6 +38,10 @@ pub struct Params<'a> {
     pub autocontrast: bool,
     /// Gamma correction before the contrast stretch (1.0 = no change).
     pub gamma: f64,
+    /// Local brush coverage at source resolution; painted areas follow `mask_gamma`.
+    pub mask: Option<&'a Plane>,
+    /// Gamma applied where the mask covers (1.0 = no change).
+    pub mask_gamma: f64,
 }
 
 pub struct Rendered {
@@ -123,6 +128,15 @@ fn photo_levels(gray: &Plane, fit: &Fit, gw: usize, gh: usize, ac: bool, g: f64)
 }
 
 pub fn render(gray: &Plane, p: &Params) -> Rendered {
+    let mut masked;
+    let gray = match p.mask {
+        Some(m) => {
+            masked = gray.clone();
+            mask::apply(&mut masked, m, p.mask_gamma);
+            &masked
+        }
+        None => gray,
+    };
     match p.frame {
         Some(f) => {
             let (hw, hh) = (f.hole.w, f.hole.h);
@@ -179,6 +193,7 @@ impl Rendered {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mask::dab;
     use crate::palette::by_name;
 
     fn ramp(w: usize, h: usize) -> Plane {
@@ -203,6 +218,8 @@ mod tests {
             frame_scale: 4,
             autocontrast: true,
             gamma: 1.0,
+            mask: None,
+            mask_gamma: 1.0,
         };
         let r = render(&g, &p);
         assert_eq!((r.out_w, r.out_h), (800, 350));
@@ -224,6 +241,8 @@ mod tests {
             frame_scale: 1,
             autocontrast: false,
             gamma: 1.0,
+            mask: None,
+            mask_gamma: 1.0,
         };
         let r = render(&g, &p);
         assert_eq!((r.grid_w, r.grid_h), (3, 2));
@@ -243,6 +262,8 @@ mod tests {
             frame_scale: 4,
             autocontrast: true,
             gamma: 1.0,
+            mask: None,
+            mask_gamma: 1.0,
         };
         let r = render(&g, &p);
         assert_eq!((r.out_w, r.out_h), (640, 576));
@@ -268,6 +289,8 @@ mod tests {
             frame_scale: 1,
             autocontrast: true,
             gamma: 1.0,
+            mask: None,
+            mask_gamma: 1.0,
         };
         let r = render(&g, &p);
         let pal = by_name("green").unwrap();
@@ -288,6 +311,8 @@ mod tests {
             frame_scale: 1,
             autocontrast: false,
             gamma: 1.0,
+            mask: None,
+            mask_gamma: 1.0,
         };
         let flat = render(&g, &base);
         assert!(flat.levels.contains(&0));
@@ -310,10 +335,41 @@ mod tests {
             frame_scale: 1,
             autocontrast: false,
             gamma: 1.0,
+            mask: None,
+            mask_gamma: 1.0,
         };
         let r = render(&g, &p);
         assert_eq!(r.levels[0], 3); // top-left is smeared white (not dark padding)
         assert_eq!(r.levels[50 * 100 + 50], 3); // centre is the (white) photo
+    }
+
+    #[test]
+    fn mask_only_changes_the_painted_area() {
+        let gray = Plane::filled(8, 8, 96);
+        let mut mask = Plane::filled(8, 8, 0);
+        dab(&mut mask, 6.0, 6.0, 1.5);
+        let common = Params {
+            fit: Fit::Cover(BoxF::full(8, 8)),
+            out_w: 8,
+            out_h: 8,
+            pixel_size: 1,
+            frame: None,
+            frame_scale: 1,
+            autocontrast: false,
+            gamma: 1.0,
+            mask: None,
+            mask_gamma: 1.0,
+        };
+        let base = render(&gray, &common);
+        let mut local = Params { mask: Some(&mask), mask_gamma: 0.5, ..common };
+        local.gamma = 1.0;
+        let brushed = render(&gray, &local);
+        for (i, &m) in mask.data.iter().enumerate() {
+            if m == 0 {
+                assert_eq!(brushed.levels[i], base.levels[i]);
+            }
+        }
+        assert_ne!(brushed.levels, base.levels);
     }
 
     #[test]
@@ -328,6 +384,8 @@ mod tests {
             frame_scale: 1,
             autocontrast: false,
             gamma: 1.0,
+            mask: None,
+            mask_gamma: 1.0,
         };
         let r = render(&g, &p);
         assert_eq!(r.levels[0], 0); // top-left is padding

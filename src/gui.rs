@@ -364,6 +364,8 @@ impl App {
             frame_scale: self.frame_scale,
             autocontrast: self.autocontrast,
             gamma: self.gamma,
+            mask: None,
+            mask_gamma: 1.0,
         }
     }
 
