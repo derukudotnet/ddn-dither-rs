@@ -46,7 +46,12 @@ ddn-dither                                # window, drop an image onto it
   follows; choose *Custom* to set both freely. The crop box always has exactly the output's
   aspect ratio.
 * **Pixel size** slider = output pixels per dithered pixel (whole numbers → crisp, even blocks).
-  *auto* aims for about 384 dithered pixels across.
+  *auto* aims for about 384 dithered pixels across; the row shows the resulting grid size if you
+  want to match the Camera's authentic 128×112 photo grid.
+* **Preview zoom**: Fit / 100% buttons above the preview. Mouse wheel zooms at the pointer,
+  dragging pans (grab cursor), double-click returns to Fit. Zoom and pan survive re-renders, so
+  you can change pixel size and compare on exactly the same spot. At 100% the preview is
+  pixel-for-pixel what the saved file contains — no need to save-and-check to judge the result.
 * **Contrast** slider boosts or softens contrast around mid-grey, on top of auto contrast (1.00 = no change).
 * **Guides** over the crop box: rule-of-thirds lines or a crosshair through the crop centre, to help alignment.
 * **Fit whole image** pads instead of cropping (padding uses the darkest tone).

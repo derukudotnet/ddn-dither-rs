@@ -98,6 +98,8 @@ struct Preview {
     grid: (usize, usize),
     levels: Vec<u8>,
     palette: Palette,
+    /// Output pixels per dither pixel (rendered scale), so 100% shows the file 1:1.
+    scale: usize,
 }
 
 struct App {
@@ -131,6 +133,9 @@ struct App {
 
     preview: Option<Preview>,
     last_key: Option<RenderKey>,
+    /// None = fit into the pane; Some(z) = z screen pixels per output pixel (1.0 = 100%).
+    preview_zoom: Option<f32>,
+    pv_pan: (f32, f32),
 
     output_override: Option<String>,
     exit_on_save: bool,
@@ -224,6 +229,8 @@ impl App {
             pal_error: None,
             preview: None,
             last_key: None,
+            preview_zoom: None,
+            pv_pan: (0.0, 0.0),
             output_override: cli.output.clone(),
             exit_on_save: !cli.inputs.is_empty(),
             status,
@@ -389,6 +396,7 @@ impl App {
                 grid: (r.grid_w, r.grid_h),
                 levels: r.levels,
                 palette: self.palette,
+                scale: r.scale,
             });
             self.last_key = Some(key);
             ctx.request_repaint();
@@ -576,13 +584,15 @@ impl App {
                             if s.trim().eq_ignore_ascii_case("auto") { Some(0.0) } else { s.trim().parse::<f64>().ok() }
                         }),
                 );
+                let ps = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
                 if self.pixel_size == 0 {
-                    ui.weak(format!("→ {}", pipeline::auto_pixel_size(self.out_w)));
+                    ui.weak(format!("→ {ps}"));
                 }
+                ui.weak(format!("{}×{} grid", self.out_w.div_ceil(ps), self.out_h.div_ceil(ps)));
             })
             .response
             .on_hover_text(
-                "Output pixels per dithered pixel. auto aims for ~384 dithered pixels across; bigger = blockier.",
+                "Output pixels per dithered pixel; the readout shows the resulting grid size (pixels across = grid width). The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
             );
         });
         if ui
@@ -845,15 +855,87 @@ impl App {
 
         // ---- live preview
         ui.separator();
+        ui.horizontal(|ui| {
+            ui.weak("Preview");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .selectable_label(self.preview_zoom.is_none(), "Fit")
+                    .on_hover_text("Scale the preview to fill the pane.")
+                    .clicked()
+                {
+                    self.preview_zoom = None;
+                    self.pv_pan = (0.0, 0.0);
+                }
+                if ui
+                    .selectable_label(self.preview_zoom == Some(1.0), "100%")
+                    .on_hover_text("One screen pixel per output pixel - pixel-for-pixel what the saved file contains.")
+                    .clicked()
+                {
+                    self.preview_zoom = Some(1.0);
+                }
+                if let Some(z) = self.preview_zoom {
+                    ui.weak(format!("{:.0}%", z * 100.0));
+                }
+            });
+        })
+        .response
+        .on_hover_text(
+            "Zoom the preview: wheel zooms at the pointer, drag pans, double-click returns to Fit. Zoom and pan survive re-renders, so you can compare pixel sizes on the same spot.",
+        );
         let pv_size = ui.available_size();
-        let (pv_rect, _) = ui.allocate_exact_size(pv_size, Sense::hover());
-        if let Some(pv) = &self.preview {
-            let (gw, gh) = (pv.grid.0 as f32, pv.grid.1 as f32);
-            let fit = (pv_rect.width() / gw).min(pv_rect.height() / gh);
-            let s = if fit >= 1.0 { fit.floor() } else { fit }; // whole-number zoom keeps pixels crisp
-            let r = Rect::from_center_size(pv_rect.center(), vec2(gw * s, gh * s));
+        let (pv_rect, pv_resp) = ui.allocate_exact_size(pv_size, Sense::click_and_drag());
+        let pv_info = self
+            .preview
+            .as_ref()
+            .map(|pv| (pv.tex.id(), pv.grid.0 as f32 * pv.scale as f32, pv.grid.1 as f32 * pv.scale as f32));
+        if let Some((tex_id, nw, nh)) = pv_info {
+            let fit = (pv_rect.width() / nw).min(pv_rect.height() / nh);
+            let s = match self.preview_zoom {
+                None => {
+                    if fit >= 1.0 { fit.floor() } else { fit } // whole-number zoom keeps pixels crisp
+                }
+                Some(z) => z,
+            };
+            let ov = (
+                ((nw * s - pv_rect.width()) / 2.0).max(0.0),
+                ((nh * s - pv_rect.height()) / 2.0).max(0.0),
+            );
+            let cl = |v: f32, o: f32| v.clamp(-o, o);
+            if pv_resp.dragged() {
+                let d = pv_resp.drag_delta();
+                self.pv_pan = (cl(self.pv_pan.0 + d.x, ov.0), cl(self.pv_pan.1 + d.y, ov.1));
+            }
+            if pv_resp.hovered() {
+                let dz = ctx.input(|i| i.raw_scroll_delta.y);
+                if dz != 0.0 {
+                    let z0 = self.preview_zoom.unwrap_or(if fit >= 1.0 { fit.floor() } else { fit });
+                    let z = (z0 * (dz / 250.0).exp()).clamp(0.1, 16.0);
+                    if let Some(pos) = pv_resp.hover_pos() {
+                        let cur = Rect::from_center_size(pv_rect.center() + vec2(self.pv_pan.0, self.pv_pan.1), vec2(nw, nh) * z0);
+                        let u = ((pos.x - cur.min.x) / cur.width(), (pos.y - cur.min.y) / cur.height());
+                        let next = Rect::from_min_size(
+                            pos2(pos.x - u.0 * nw * z, pos.y - u.1 * nh * z),
+                            vec2(nw * z, nh * z),
+                        );
+                        let c = next.center() - pv_rect.center();
+                        self.pv_pan = (cl(c.x, ov.0), cl(c.y, ov.1));
+                    }
+                    self.preview_zoom = Some(z);
+                }
+            }
+            if pv_resp.double_clicked() {
+                self.preview_zoom = None;
+                self.pv_pan = (0.0, 0.0);
+            }
+            if self.preview_zoom.is_some() && (pv_resp.hovered() || pv_resp.dragged()) {
+                ctx.set_cursor_icon(if pv_resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+            }
+            let r = Rect::from_center_size(
+                pv_rect.center() + vec2(self.pv_pan.0, self.pv_pan.1),
+                vec2(nw, nh) * s,
+            );
             let p = ui.painter_at(pv_rect);
-            p.image(pv.tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            p.image(tex_id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
     }
 }
