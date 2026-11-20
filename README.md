@@ -46,7 +46,7 @@ ddn-dither                                # window, drop an image onto it
 * Size: aspect presets + width/height (with a swap button). With a preset the other dimension
   follows; choose *Custom* to set both freely. The crop box always has exactly the output's
   aspect ratio.
-* **Integer scale** (Size & crop) keeps the dither blocks whole and uncropped *without
+* **Integer scale** (Output size) keeps the dither blocks whole and uncropped *without
   changing your output size*: while it is on, the pixel-size slider is replaced by one-click
   choices for exactly the values that divide width and height (800×350, for instance, allows
   1, 2, 5, 10, 25, 50, plus *auto*); the effective one is marked. Turning it off brings the

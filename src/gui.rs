@@ -661,7 +661,6 @@ impl App {
         let info = self.frame().map(|f| (f.hole.w, f.hole.h, f.w, f.h, f.source_grey_values, f.hole_is_rect));
         let framed = info.is_some();
         if let Some((hole_w, hole_h, fw, fh, greys, hole_is_rect)) = info {
-            ui.add(egui::Label::new(format!("Window {hole_w}×{hole_h} px, frame {fw}×{fh} px")).truncate());
             if greys > 4 {
                 ui.add(egui::Label::new(egui::RichText::new(format!("Converted from {greys} grey values to 4 tones.")).color(Color32::from_rgb(200, 140, 0))).truncate());
             }
@@ -675,13 +674,13 @@ impl App {
             )
             .on_hover_text("Integer upscale of the framed image. ×4 makes 640×576 for the built-in frame.");
             let s = self.frame_scale.max(1);
-            ui.add(egui::Label::new(format!("Output {}×{} px (set by the frame)", fw * s, fh * s)).truncate());
+            ui.add(egui::Label::new(format!("Window {hole_w}×{hole_h} px → output {}×{} (×{s})", fw * s, fh * s)).truncate());
         }
         ui.separator();
 
-        // ---- size / aspect
+        // ---- output size
         ui.add_enabled_ui(!framed, |ui| {
-            ui.strong("Size & crop");
+            ui.strong("Output size");
             let before_idx = self.aspect_idx;
             egui::ComboBox::from_id_salt("aspect")
                 .selected_text(format!("Aspect: {}", ASPECT_PRESETS[self.aspect_idx].0))
@@ -700,6 +699,7 @@ impl App {
             }
             let (ow, oh, old_ps, snap_before) = (self.out_w, self.out_h, self.pixel_size, self.snap_pixels);
             ui.horizontal(|ui| {
+                ui.spacing_mut().interact_size.x = 64.0;
                 ui.label("W");
                 ui.add(egui::DragValue::new(&mut self.out_w).range(1..=16384));
                 ui.label("H");
@@ -715,6 +715,11 @@ impl App {
             })
             .response
             .on_hover_text("Output size in pixels. With an aspect preset, changing one side adjusts the other.");
+            ui.checkbox(&mut self.snap_pixels, "Integer scale")
+                .on_hover_text(
+                    "Replaces the pixel-size slider while it is on: only sizes that divide your output exactly are offered, so every dither block stays a whole, uncropped N×N and the output size is never changed (turning it off brings the free slider back).",
+                )
+                .changed();
             if self.aspect_idx != 0 {
                 let a = ASPECT_PRESETS[self.aspect_idx].1;
                 if self.out_w != ow {
@@ -770,81 +775,75 @@ impl App {
                     "Output pixels per dithered pixel; the readout shows the resulting grid size (pixels across = grid width) and whether any row/column of the output would be cropped. The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
                 );
             }
-            ui.checkbox(&mut self.snap_pixels, "Integer scale")
-                .on_hover_text(
-                    "Replaces the pixel-size slider while it is on: only sizes that divide your output exactly are offered, so every dither block stays a whole, uncropped N×N and the output size is never changed (turning it off brings the free slider back).",
-                )
-                .changed();
             if self.snap_pixels
                 && (self.pixel_size != old_ps || self.out_w != ow || self.out_h != oh || self.snap_pixels != snap_before)
             {
                 self.snap_pixels_to_output();
             }
         });
-        if ui
-            .button(format!("Guides: {}", self.guides.name()))
-            .on_hover_text("Guide lines over the crop box to help alignment: rule-of-thirds lines and/or a full-size crosshair through the crop centre.")
-            .clicked()
-        {
-            self.guides = self.guides.next();
-        }
-        ui.horizontal(|ui| {
-            ui.label("Fit");
-            for (i, name) in ["Crop", "Pad", "Edge pad"].iter().enumerate() {
-                if ui.selectable_label(self.fit_mode == i, *name).clicked() {
-                    self.fit_mode = i;
+        ui.separator();
+
+        // ---- crop
+        ui.add_enabled_ui(!framed, |ui| {
+            ui.strong("Crop");
+            ui.horizontal(|ui| {
+                ui.label("Fit");
+                for (i, name) in ["Crop", "Pad", "Edge pad"].iter().enumerate() {
+                    if ui.selectable_label(self.fit_mode == i, *name).clicked() {
+                        self.fit_mode = i;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("How the picture fills the output. Crop: centre-crop to the output aspect. Pad: scale the whole picture in and fill the rest with the darkest tone. Edge pad: fill the rest by repeating the picture's outermost rows and columns, so the image looks smeared out to the edges.");
+            if self.fit_mode == 0 {
+                if let Some((iw, ih)) = self.source.as_ref().map(|s| (s.w as f64, s.h as f64)) {
+                    let c = self.crop;
+                    let (mut x, mut y, mut w, mut h) = (c.x, c.y, c.w, c.h);
+                    let (bx, by, bw, bh) = (x, y, w, h);
+                    let grid = egui::Grid::new("crop_fields").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
+                        ui.spacing_mut().interact_size.x = 64.0;
+                        ui.label("X");
+                        ui.add(egui::DragValue::new(&mut x).speed(0.5).range(0.0..=iw));
+                        ui.label("Y");
+                        ui.add(egui::DragValue::new(&mut y).speed(0.5).range(0.0..=ih));
+                        ui.end_row();
+                        ui.label("W");
+                        ui.add(egui::DragValue::new(&mut w).speed(0.5).range(1.0..=iw));
+                        ui.label("H");
+                        ui.add(egui::DragValue::new(&mut h).speed(0.5).range(1.0..=ih));
+                        ui.end_row();
+                    });
+                    grid.response.on_hover_text("Exact crop position and size in source pixels. They follow the box while you drag it; typing or dragging a number moves the box. W or H snaps to the aspect ratio (the one you edit wins), values clamp to the picture. Hold Shift with the arrow keys to nudge by 10.");
+                    if (x, y) != (bx, by) {
+                        self.crop = CropBox { x, y, w: c.w, h: c.h }.clamped_position(iw, ih);
+                    }
+                    if (w, h) != (bw, bh) {
+                        let min_w = 24.0_f64.min(iw / 4.0);
+                        let aspect = self.aspect();
+                        let mut wp = w.round().clamp(min_w, iw);
+                        if h != bh && w == bw {
+                            wp = (h.round().clamp(1.0, ih) * aspect).round().clamp(min_w, iw);
+                        }
+                        let mut hp = (wp / aspect).round();
+                        if hp > ih {
+                            hp = ih;
+                            wp = (hp * aspect).round().clamp(min_w, iw);
+                            hp = (wp / aspect).round().min(ih);
+                        }
+                        self.crop = CropBox { x: c.x, y: c.y, w: wp, h: hp }.clamped_position(iw, ih);
+                    }
                 }
             }
-        })
-        .response
-        .on_hover_text("How the picture fills the output. Crop: centre-crop to the output aspect. Pad: scale the whole picture in and fill the rest with the darkest tone. Edge pad: fill the rest by repeating the picture's outermost rows and columns, so the image looks smeared out to the edges.");
-        if !framed && self.fit_mode == 0 {
-            if let Some((iw, ih)) = self.source.as_ref().map(|s| (s.w as f64, s.h as f64)) {
-                let c = self.crop;
-                let (mut x, mut y, mut w, mut h) = (c.x, c.y, c.w, c.h);
-                let (bx, by, bw, bh) = (x, y, w, h);
-                let grid = egui::Grid::new("crop_fields").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
-                    ui.spacing_mut().interact_size.x = 64.0;
-                    ui.label("X");
-                    ui.add(egui::DragValue::new(&mut x).speed(0.5).range(0.0..=iw));
-                    ui.label("Y");
-                    ui.add(egui::DragValue::new(&mut y).speed(0.5).range(0.0..=ih));
-                    ui.end_row();
-                    ui.label("W");
-                    ui.add(egui::DragValue::new(&mut w).speed(0.5).range(1.0..=iw));
-                    ui.label("H");
-                    ui.add(egui::DragValue::new(&mut h).speed(0.5).range(1.0..=ih));
-                    ui.end_row();
-                });
-                grid.response.on_hover_text("Exact crop position and size in source pixels. They follow the box while you drag it; typing or dragging a number moves the box. W or H snaps to the aspect ratio (the one you edit wins), values clamp to the picture. Hold Shift with the arrow keys to nudge by 10.");
-                if (x, y) != (bx, by) {
-                    self.crop = CropBox { x, y, w: c.w, h: c.h }.clamped_position(iw, ih);
-                }
-                if (w, h) != (bw, bh) {
-                    let min_w = 24.0_f64.min(iw / 4.0);
-                    let aspect = self.aspect();
-                    let mut wp = w.round().clamp(min_w, iw);
-                    if h != bh && w == bw {
-                        wp = (h.round().clamp(1.0, ih) * aspect).round().clamp(min_w, iw);
-                    }
-                    let mut hp = (wp / aspect).round();
-                    if hp > ih {
-                        hp = ih;
-                        wp = (hp * aspect).round().clamp(min_w, iw);
-                        hp = (wp / aspect).round().min(ih);
-                    }
-                    self.crop = CropBox { x: c.x, y: c.y, w: wp, h: hp }.clamped_position(iw, ih);
-                }
-            }
-        }
+        });
         ui.separator();
 
         // ---- contrast
         ui.strong("Contrast");
-        ui.checkbox(&mut self.autocontrast, "Auto contrast")
+        ui.checkbox(&mut self.autocontrast, "Auto")
             .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
         ui.horizontal(|ui| {
-            ui.label("Contrast");
+            ui.label("Manual");
             ui.add(
                 egui::Slider::new(&mut self.contrast, 0.25..=4.0)
                     .custom_formatter(|n, _| format!("{n:.2}"))
@@ -1014,6 +1013,7 @@ impl App {
                 self.save_as();
             }
         });
+        ui.add_space(6.0);
         if ui
             .button("Copy command line")
             .on_hover_text("Puts a command line with the current size, pixel size, fit mode, contrast, format, palette and frame onto the clipboard, so the current render can be reproduced in a script. The crop position itself is chosen in the window, so the command crops to the output aspect instead.")
@@ -1064,6 +1064,7 @@ impl App {
             return;
         };
 
+        let framed_src = self.frame().is_some();
         let avail = ui.available_size();
         const IMG_PAD: f32 = 14.0;
         let source_h = (avail.y * 0.58).max(160.0 + 2.0 * IMG_PAD);
@@ -1174,6 +1175,16 @@ impl App {
             painter.rect_filled(area, 0.0, Color32::from_black_alpha(160));
             painter.text(area.center(), egui::Align2::CENTER_CENTER, "Release to open", egui::FontId::proportional(22.0), Color32::WHITE);
         }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(!framed_src, egui::Button::new(format!("Guides: {}", self.guides.name())))
+                .on_hover_text("Guide lines over the crop box to help alignment: rule-of-thirds lines and/or a full-size crosshair through the crop centre.")
+                .clicked()
+            {
+                self.guides = self.guides.next();
+            }
+        });
 
         // ---- live preview
         ui.separator();
