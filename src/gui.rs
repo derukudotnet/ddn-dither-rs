@@ -4,6 +4,7 @@
 //! All geometry and image processing lives in the `ddn_dither` library and is unit-tested
 //! there; this file only wires it to egui widgets.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use eframe::egui::{self, pos2, vec2, Color32, Rect, Sense, Stroke, TextureHandle, TextureOptions};
@@ -142,8 +143,8 @@ struct App {
     fit_mode: usize,
     autocontrast: bool,
     gamma: f64,
-    /// Leftover wheel points on the gamma slider, spent in 0.05 steps once a full line is reached.
-    gamma_wheel_acc: f64,
+    /// Leftover wheel points per slider (by widget id), spent in whole steps once a full line is reached.
+    wheel_acc: HashMap<egui::Id, f64>,
     snap_pixels: bool,
     guides: Guides,
     format: Format,
@@ -153,8 +154,6 @@ struct App {
     brush_r: f64,
     /// Feathering of the dab rim as a percentage of the radius (0 = hard circle).
     brush_soft: f64,
-    /// Leftover wheel points on the brush gamma slider.
-    brush_wheel_acc: f64,
     /// Painted coverage at source resolution; `None` until the first dab.
     mask: Option<Plane>,
     /// Bumped on every mutation of `mask` so the preview re-renders.
@@ -280,13 +279,12 @@ impl App {
             fit_mode: fit_mode_of(cli.crop_mode),
             autocontrast: cli.autocontrast,
             gamma: cli.gamma,
-            gamma_wheel_acc: 0.0,
+            wheel_acc: HashMap::new(),
             snap_pixels: false,
             guides: Guides::Thirds,
             tool: Tool::Crop,
             brush_r: 24.0,
             brush_soft: BRUSH_SOFT_DEFAULT,
-            brush_wheel_acc: 0.0,
             mask: None,
             mask_version: 0,
             mask_view: None,
@@ -805,11 +803,11 @@ impl App {
             if !hole_is_rect {
                 ui.add(egui::Label::new(egui::RichText::new("Window is not a plain rectangle; the photo fills its bounding box.").color(Color32::from_rgb(200, 140, 0))).truncate());
             }
-            ui.add(
-                egui::Slider::new(&mut self.frame_scale, 1..=16)
+            wheel_slider(ui, &mut self.wheel_acc, &mut self.frame_scale, |v| {
+                egui::Slider::new(v, 1..=16)
                     .custom_formatter(|n, _| format!("×{n:.0}"))
-                    .text("Scale"),
-            )
+                    .text("Scale")
+            }, 1.0, 16.0, 1.0)
             .on_hover_text("Integer upscale of the framed image. ×4 makes 640×576 for the built-in frame.");
             let s = self.frame_scale.max(1);
             ui.add(egui::Label::new(format!("Window {hole_w}×{hole_h} px → output {}×{} (×{s})", fw * s, fh * s)).truncate());
@@ -891,13 +889,13 @@ impl App {
             } else {
                 ui.horizontal(|ui| {
                     ui.label("Pixel size");
-                    ui.add(
-                        egui::Slider::new(&mut self.pixel_size, 0..=32)
+                    wheel_slider(ui, &mut self.wheel_acc, &mut self.pixel_size, |v| {
+                        egui::Slider::new(v, 0..=32)
                             .custom_formatter(|n, _| if n == 0.0 { "auto".to_string() } else { format!("{n:.0}") })
                             .custom_parser(|s| {
                                 if s.trim().eq_ignore_ascii_case("auto") { Some(0.0) } else { s.trim().parse::<f64>().ok() }
-                            }),
-                    );
+                            })
+                    }, 0.0, 32.0, 1.0);
                     let ps = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
                     if self.pixel_size == 0 {
                         ui.weak(format!("→ {ps}"));
@@ -1010,13 +1008,12 @@ impl App {
         if self.tool != Tool::Crop {
             ui.horizontal(|ui| {
                 ui.label("Gamma");
-                let sresp = ui.add(
-                    egui::Slider::new(&mut self.mask_gamma, GAMMA_MIN..=GAMMA_MAX)
+                wheel_slider(ui, &mut self.wheel_acc, &mut self.mask_gamma, |v| {
+                    egui::Slider::new(v, GAMMA_MIN..=GAMMA_MAX)
                         .step_by(0.05)
                         .custom_formatter(|n, _| format!("{n:.2}"))
-                        .custom_parser(|s| s.trim().parse::<f64>().ok()),
-                );
-                wheel_step(ui, &sresp, &mut self.brush_wheel_acc, &mut self.mask_gamma, GAMMA_MIN, GAMMA_MAX, 0.05);
+                        .custom_parser(|s| s.trim().parse::<f64>().ok())
+                }, GAMMA_MIN, GAMMA_MAX, 0.05);
                 if ui.small_button("Reset").on_hover_text("Back to the starting strength").clicked() {
                     self.mask_gamma = BRUSH_GAMMA_DEFAULT;
                 }
@@ -1025,14 +1022,14 @@ impl App {
             .on_hover_text("Curve applied where you painted, before the contrast stretch. Below 1.00 brightens, above 1.00 darkens. Arrow keys, mouse wheel over the box or dragging all move in 0.05 steps.");
             ui.horizontal(|ui| {
                 ui.label("Softness");
-                ui.add(
-                    egui::Slider::new(&mut self.brush_soft, 0.0..=95.0)
+                wheel_slider(ui, &mut self.wheel_acc, &mut self.brush_soft, |v| {
+                    egui::Slider::new(v, 0.0..=95.0)
                         .step_by(5.0)
-                        .suffix("%"),
-                );
+                        .suffix("%")
+                }, 0.0, 95.0, 5.0);
             })
             .response
-            .on_hover_text("Feathering of the brush edge, as a percentage of the brush radius: 0% is a hard circle, 50% feather over the outer half, higher blends even wider so the painted area fades into the picture.");
+            .on_hover_text("Feathering of the brush edge, as a percentage of the brush radius: 0% is a hard circle, 50% feather over the outer half, higher blends even wider so the painted area fades into the picture. Mouse wheel over the box changes it in 5% steps.");
             ui.weak(format!(
                 "Brush {} px on a {}x{} picture - mouse wheel changes it",
                 self.brush_r.round() as i64,
@@ -1048,13 +1045,12 @@ impl App {
             .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
         ui.horizontal(|ui| {
             ui.label("Gamma");
-            let sresp = ui.add(
-                egui::Slider::new(&mut self.gamma, GAMMA_MIN..=GAMMA_MAX)
+            wheel_slider(ui, &mut self.wheel_acc, &mut self.gamma, |v| {
+                egui::Slider::new(v, GAMMA_MIN..=GAMMA_MAX)
                     .step_by(0.05)
                     .custom_formatter(|n, _| format!("{n:.2}"))
-                    .custom_parser(|s| s.trim().parse::<f64>().ok()),
-            );
-            wheel_step(ui, &sresp, &mut self.gamma_wheel_acc, &mut self.gamma, GAMMA_MIN, GAMMA_MAX, 0.05);
+                    .custom_parser(|s| s.trim().parse::<f64>().ok())
+            }, GAMMA_MIN, GAMMA_MAX, 0.05);
             if ui.small_button("Reset").on_hover_text("Back to no gamma (1.00)").clicked() {
                 self.gamma = 1.0;
             }
@@ -1541,26 +1537,38 @@ impl App {
     }
 }
 
-/// Step `value` in `step` increments from wheel input while `resp` is hovered, snapping to the
-/// step grid, clamping to `[min, max]` and consuming the scroll so the sidebar does not scroll.
-fn wheel_step(ui: &mut egui::Ui, resp: &egui::Response, acc: &mut f64, value: &mut f64, min: f64, max: f64, step: f64) {
-    if !resp.hovered() {
-        return;
-    }
-    let dy = ui.input(|i| i.raw_scroll_delta.y);
-    if dy != 0.0 {
-        *acc += dy as f64;
-        let steps = (*acc / 8.0).trunc();
-        if steps != 0.0 {
-            *acc -= steps * 8.0;
-            *value = (*value + steps * step).clamp(min, max);
-            *value = (*value / step).round() * step;
+/// Add a slider that also moves with the mouse wheel while hovered: `step` per eight scroll
+/// points (one notch typically gives a few steps), snapped to the grid, clamped to `[min, max]`,
+/// and the scroll consumed so the surrounding ScrollArea does not scroll at the same time.
+/// All sliders in this app go through this, so the behaviour is uniform everywhere.
+fn wheel_slider<T: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    accs: &mut HashMap<egui::Id, f64>,
+    value: &mut T,
+    make: impl FnOnce(&mut T) -> egui::Slider<'_>,
+    min: f64,
+    max: f64,
+    step: f64,
+) -> egui::Response {
+    let resp = ui.add(make(value));
+    if resp.hovered() {
+        let dy = ui.input(|i| i.raw_scroll_delta.y);
+        if dy != 0.0 {
+            let acc = accs.entry(resp.id).or_insert(0.0);
+            *acc += dy as f64;
+            let steps = (*acc / 8.0).trunc();
+            if steps != 0.0 {
+                *acc -= steps * 8.0;
+                let v = (T::to_f64(*value) + steps * step).clamp(min, max);
+                *value = T::from_f64((v / step).round() * step);
+            }
+            ui.input_mut(|i| {
+                i.raw_scroll_delta = egui::Vec2::ZERO;
+                i.smooth_scroll_delta = egui::Vec2::ZERO;
+            });
         }
-        ui.input_mut(|i| {
-            i.raw_scroll_delta = egui::Vec2::ZERO;
-            i.smooth_scroll_delta = egui::Vec2::ZERO;
-        });
     }
+    resp
 }
 
 /// Nearest-neighbour shrink of a coverage plane, precise enough for tint and proxy use.
