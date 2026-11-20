@@ -122,6 +122,7 @@ struct App {
     fit_contain: bool,
     autocontrast: bool,
     contrast: f64,
+    snap_pixels: bool,
     guides: Guides,
     format: Format,
 
@@ -190,7 +191,7 @@ impl App {
                 Some(f) => frame_idx = frames.iter().position(|g| g.name == f.name),
                 None => status = format!("unknown built-in frame '{id}'"),
             },
-            FrameSel::Path(p) => match io::load_frame(p) {
+            FrameSel::Path(p) => match io::load_frame(p, "Custom") {
                 Ok(f) => {
                     frames.push(f);
                     frame_idx = Some(frames.len() - 1);
@@ -223,6 +224,7 @@ impl App {
             fit_contain: cli.crop_mode == CropMode::Contain,
             autocontrast: cli.autocontrast,
             contrast: cli.contrast,
+            snap_pixels: false,
             guides: Guides::Thirds,
             format: cli.format,
             frames,
@@ -492,6 +494,7 @@ impl App {
         self.fit_contain = self.cli.crop_mode == CropMode::Contain;
         self.autocontrast = self.cli.autocontrast;
         self.contrast = self.cli.contrast;
+        self.snap_pixels = false;
         self.frame_scale = self.cli.scale;
         self.format = self.cli.format;
         self.guides = Guides::Thirds;
@@ -513,6 +516,26 @@ impl App {
         self.status = "Settings reset to startup values.".to_string();
     }
 
+    /// With integer scaling on, round width/height to the nearest multiple of the pixel size
+    /// so no output row or column is cropped away.
+    fn snap_output(&mut self) {
+        if self.pixel_size == 0 {
+            return;
+        }
+        let ps = self.pixel_size.max(1);
+        let nw = ((self.out_w as f64 / ps as f64).round() as usize).max(1) * ps;
+        let nh = ((self.out_h as f64 / ps as f64).round() as usize).max(1) * ps;
+        if nw != self.out_w || nh != self.out_h {
+            self.out_w = nw;
+            self.out_h = nh;
+            let a = self.out_w as f64 / self.out_h as f64;
+            self.aspect_idx = ASPECT_PRESETS
+                .iter()
+                .position(|(_, p)| *p > 0.0 && (p - a).abs() < 0.002)
+                .unwrap_or(0);
+        }
+    }
+
     fn open_dialog(&mut self, ctx: &egui::Context) {
         let picked = rfd::FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
@@ -527,7 +550,7 @@ impl App {
         else {
             return;
         };
-        match io::load_frame(&p.to_string_lossy()) {
+        match io::load_frame(&p.to_string_lossy(), "Custom") {
             Ok(f) => {
                 self.frames.push(f);
                 self.frame_idx = Some(self.frames.len() - 1);
@@ -556,38 +579,32 @@ impl App {
             .show_ui(ui, |ui| {
                 ui.set_min_width(200.0);
                 ui.selectable_value(&mut self.frame_idx, None, "None");
-                let groups: [( &str, (usize, usize)); 2] =
-                    [("Game Boy Camera", (160, 144)), ("Wild frames", (160, 224))];
-                let mut rest: Vec<usize> = (0..self.frames.len()).collect();
-                for (label, size) in groups {
-                    let members: Vec<usize> = rest
-                        .iter()
-                        .copied()
-                        .filter(|&i| (self.frames[i].w, self.frames[i].h) == size)
-                        .collect();
-                    if members.is_empty() {
-                        continue;
-                    }
-                    rest.retain(|i| !members.contains(i));
-                    ui.separator();
-                    ui.strong(label);
-                    for i in members {
-                        let name = pretty_frame_name(&self.frames[i].name);
-                        ui.selectable_value(&mut self.frame_idx, Some(i), name);
+                let group_of = |i: usize| -> String {
+                    let g = &self.frames[i].group;
+                    if g.is_empty() { "Built-in".to_string() } else { g.clone() }
+                };
+                let mut groups: Vec<String> = Vec::new();
+                for i in 0..self.frames.len() {
+                    let g = group_of(i);
+                    if !groups.contains(&g) {
+                        groups.push(g);
                     }
                 }
-                if !rest.is_empty() {
+                groups.sort_by(|a, b| group_rank(a).cmp(&group_rank(b)).then_with(|| a.cmp(b)));
+                for g in &groups {
                     ui.separator();
-                    ui.strong("Other sizes");
-                    for i in rest {
-                        let name = pretty_frame_name(&self.frames[i].name);
-                        ui.selectable_value(&mut self.frame_idx, Some(i), name);
+                    ui.strong(pretty_frame_name(g));
+                    for i in 0..self.frames.len() {
+                        if &group_of(i) == g {
+                            let name = pretty_frame_name(&self.frames[i].name);
+                            ui.selectable_value(&mut self.frame_idx, Some(i), name);
+                        }
                     }
                 }
             })
             .response
             .on_hover_text(
-                "A frame is four-tone art with a transparent window for the photo. It sets the output size and locks the crop to the window's aspect. Frames are grouped by size: 160\u{d7}144 (Game Boy Camera), 160\u{d7}224 (wild), everything else.",
+                "A frame is four-tone art with a transparent window for the photo. It sets the output size and locks the crop to the window's aspect. Frames are grouped by the folder they came from: assets/ is Built-in, an assets/<sub>/ or frames/<sub>/ subfolder is its own group, frames/ top level is Custom.",
             );
         if ui
             .small_button("Load frame file…")
@@ -639,7 +656,7 @@ impl App {
                 let a = ASPECT_PRESETS[self.aspect_idx].1;
                 self.out_h = ((self.out_w as f64 / a).round() as usize).max(1);
             }
-            let (ow, oh) = (self.out_w, self.out_h);
+            let (ow, oh, old_ps, snap_before) = (self.out_w, self.out_h, self.pixel_size, self.snap_pixels);
             ui.horizontal(|ui| {
                 ui.label("W");
                 ui.add(egui::DragValue::new(&mut self.out_w).range(1..=16384));
@@ -678,11 +695,25 @@ impl App {
                     ui.weak(format!("→ {ps}"));
                 }
                 ui.weak(format!("{}×{} grid", self.out_w.div_ceil(ps), self.out_h.div_ceil(ps)));
+                let (cw, ch) = (self.out_w % ps, self.out_h % ps);
+                if cw != 0 || ch != 0 {
+                    ui.weak(format!("(crops {cw}×{ch} px)"));
+                }
             })
             .response
             .on_hover_text(
-                "Output pixels per dithered pixel; the readout shows the resulting grid size (pixels across = grid width). The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
+                "Output pixels per dithered pixel; the readout shows the resulting grid size (pixels across = grid width) and whether any row/column of the output would be cropped. The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
             );
+            ui.checkbox(&mut self.snap_pixels, "Integer scale")
+                .on_hover_text(
+                    "Rounds width and height to an exact ×N of the pixel size so the dither grid fully covers the output and nothing is cropped. Overrules aspect presets when they disagree (the preset falls back to Custom).",
+                )
+                .changed();
+            if self.snap_pixels
+                && (self.pixel_size != old_ps || self.out_w != ow || self.out_h != oh || self.snap_pixels != snap_before)
+            {
+                self.snap_output();
+            }
         });
         if ui
             .button(format!("Guides: {}", self.guides.name()))
@@ -1076,7 +1107,16 @@ fn human_size(n: u64) -> String {
     }
 }
 
-/// Display name for a frame: "film_roll (built-in)" -> "Film Roll (built-in)".
+/// Dropdown section order: built-ins first, folder groups in between, Custom last.
+fn group_rank(g: &str) -> usize {
+    match g {
+        "Built-in" => 0,
+        "Custom" => usize::MAX,
+        _ => 1,
+    }
+}
+
+/// Display name for a frame: "film_roll" -> "Film Roll".
 fn pretty_frame_name(raw: &str) -> String {
     let (id, suffix) = match raw.find(" (") {
         Some(i) => (&raw[..i], &raw[i..]),

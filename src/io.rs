@@ -31,11 +31,13 @@ pub fn load_rgb(path: &str) -> Result<RgbImage, String> {
 }
 
 /// Load a frame PNG (needs an alpha channel with a transparent window).
-pub fn load_frame(path: &str) -> Result<Frame, String> {
+pub fn load_frame(path: &str, group: &str) -> Result<Frame, String> {
     let img = image::open(path).map_err(|e| format!("cannot open frame {path}: {e}"))?.to_rgba8();
     let (w, h) = img.dimensions();
     let name = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
-    Frame::from_rgba(name, w as usize, h as usize, img.as_raw())
+    let mut f = Frame::from_rgba(name, w as usize, h as usize, img.as_raw())?;
+    f.group = group.to_string();
+    Ok(f)
 }
 
 /// Folders searched for extra frames: `frames/` next to the executable and the user config dir.
@@ -64,13 +66,25 @@ pub fn discover_frames() -> (Vec<Frame>, Vec<String>) {
     let mut warnings = Vec::new();
     for dir in frame_dirs() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        let mut paths: Vec<PathBuf> = rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("png")).unwrap_or(false))
-            .collect();
-        paths.sort();
-        for p in paths {
-            match load_frame(&p.to_string_lossy()) {
+        let is_png = |p: &PathBuf| {
+            p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("png")).unwrap_or(false)
+        };
+        let mut entries: Vec<(String, PathBuf)> = Vec::new();
+        for e in rd.filter_map(|e| e.ok().map(|e| e.path())) {
+            if e.is_dir() {
+                for f in std::fs::read_dir(&e).into_iter().flatten().filter_map(|x| x.ok().map(|x| x.path())) {
+                    if is_png(&f) {
+                        let sub = e.file_name().and_then(|n| n.to_str().map(String::from)).unwrap_or_default();
+                        entries.push((sub, f));
+                    }
+                }
+            } else if is_png(&e) {
+                entries.push(("Custom".to_string(), e));
+            }
+        }
+        entries.sort();
+        for (group, p) in entries {
+            match load_frame(&p.to_string_lossy(), &group) {
                 Ok(f) => frames.push(f),
                 Err(e) => warnings.push(format!("{}: {e}", p.display())),
             }

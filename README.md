@@ -45,6 +45,9 @@ ddn-dither                                # window, drop an image onto it
 * Size: aspect presets + width/height (with a swap button). With a preset the other dimension
   follows; choose *Custom* to set both freely. The crop box always has exactly the output's
   aspect ratio.
+* **Integer scale** (Size & crop) rounds width and height to the nearest multiple of the
+  pixel size, so the output is an exact ×N of the dither grid and no partial row/column
+  is cropped; the pixel-size row warns when a partial row/column would be cut off.
 * **Pixel size** slider = output pixels per dithered pixel (whole numbers → crisp, even blocks).
   *auto* aims for about 384 dithered pixels across; the row shows the resulting grid size if you
   want to match the Camera's authentic 128×112 photo grid.
@@ -89,9 +92,15 @@ size: 160×144 (Game Boy Camera), 160×224 (wild), everything else under "Other 
      stripped; it also takes directories, and `-n` previews the names). It reproduces
      `assets/frame_deruku.bin` from `assets/frame_deruku_4tone.png` byte for byte.
      The old explicit form `genframe.py myframe.png assets/frame_myframe.bin` still works.
-  2. Rebuild. `build.rs` collects every `assets/frame_*.bin` at compile time, so the frame
-     appears in the window's frame list and can be selected with `--frame myframe`.
+  2. Rebuild. `build.rs` collects every `assets/frame_*.bin` at compile time (top level and
+     one subfolder level), so the frame appears in the window's frame list and can be
+     selected with `--frame myframe`.
      (`--frame default`/`--frame builtin` keeps meaning the first one in file-name order.)
+
+  **The frame dropdown is grouped by folder.** Top-level `assets/frame_*.bin` files form the
+  *Built-in* section; frames in `assets/<sub>/` (e.g. `assets/wild/`) form one section per
+  folder; runtime frames in `frames/` likewise, with top-level `frames/*.png` under
+  *Custom*. Sections appear as Built-in, then folders alphabetically, then Custom.
 
   If you skip step 1 you don't even need a rebuild: drop the plain PNG in a `frames/`
   folder (next to the executable, or in `~/.config/ddn-dither/frames/`) and the window

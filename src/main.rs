@@ -63,7 +63,7 @@ fn load_selected_frame(sel: &FrameSel) -> Result<Option<Frame>, String> {
                 if Frame::builtin_ids().is_empty() { "none".to_string() } else { Frame::builtin_ids().join(", ") }
             )),
         },
-        FrameSel::Path(p) => io::load_frame(p).map(Some),
+        FrameSel::Path(p) => io::load_frame(p, "Custom").map(Some),
     }
 }
 
