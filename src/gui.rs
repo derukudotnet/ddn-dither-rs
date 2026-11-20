@@ -179,6 +179,16 @@ impl App {
     }
 
     fn build(ctx: &egui::Context, cli: Cli) -> App {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "symbols".to_owned(),
+            egui::FontData::from_static(include_bytes!("../assets/fonts/symbols.ttf")),
+        );
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().push("symbols".to_owned());
+        }
+        ctx.set_fonts(fonts);
+
         let mut status = String::new();
 
         // Frames: built-ins first (all assets/frame_<id>.bin), then the frames folders.
@@ -1176,14 +1186,16 @@ impl App {
             painter.text(area.center(), egui::Align2::CENTER_CENTER, "Release to open", egui::FontId::proportional(22.0), Color32::WHITE);
         }
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add_enabled(!framed_src, egui::Button::new(format!("Guides: {}", self.guides.name())))
-                .on_hover_text("Guide lines over the crop box to help alignment: rule-of-thirds lines and/or a full-size crosshair through the crop centre.")
-                .clicked()
-            {
-                self.guides = self.guides.next();
-            }
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(!framed_src, egui::Button::new(format!("Guides: {}", self.guides.name())))
+                    .on_hover_text("Guide lines over the crop box to help alignment: rule-of-thirds lines and/or a full-size crosshair through the crop centre.")
+                    .clicked()
+                {
+                    self.guides = self.guides.next();
+                }
+            });
         });
 
         // ---- live preview
@@ -1502,6 +1514,7 @@ mod interaction {
             let _ = ctx.run(ri, |ctx| app.update(ctx, frame));
         }
         assert_eq!(app.crop, before, "idle frames changed the crop box");
+        assert!(ctx.fonts(|f| f.has_glyphs(&egui::FontId::proportional(14.0), "⇄→✓")), "symbol fallback font missing glyphs");
         let _ = std::fs::remove_file(&path);
     }
 }
