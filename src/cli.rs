@@ -18,9 +18,9 @@ OPTIONS:
     -a, --aspect RATIO        W:H, W/H or a number (21:9, 16/9, 2.33)
         --crop-mode MODE      cover (centre crop, default), contain (pad), pad (repeat
                               edge pixels to fill), interactive (window)
-    -p, --palette SPEC        ddn (default), green, bw, pocket, color, or four hex colours
-                              darkest first, e.g. '#0f0f0f,#4a4a4a,#868686,#c1c1c1'
-                              (3-digit shorthand like '#0f0' works)
+    -p, --palette SPEC        ddn (default), green, bgb, pocket, bw, demichrome, icecream,
+                              kirokaze, color, or four hex colours darkest first, e.g.
+                              '#0f0f0f,#4a4a4a,#868686,#c1c1c1' (3-digit shorthand like '#0f0' works)
         --pixel-size N        Output pixels per dithered pixel (default: auto, about 384 across)
         --frame SPEC          none (default), default (built-in), the id of a compiled-in
                               frame (assets/frame_<id>.bin), or the path of a frame PNG

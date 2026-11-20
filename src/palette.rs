@@ -5,11 +5,15 @@ pub type Palette = [Rgb; 4];
 
 pub const DEFAULT_NAME: &str = "ddn";
 
-pub const BUILTIN: [(&str, Palette); 5] = [
+pub const BUILTIN: [(&str, Palette); 9] = [
     ("ddn", [[15, 15, 15], [74, 74, 74], [134, 134, 134], [193, 193, 193]]),
     ("green", [[48, 58, 29], [108, 117, 88], [167, 177, 148], [227, 236, 207]]),
-    ("bw", [[0, 0, 0], [85, 85, 85], [170, 170, 170], [255, 255, 255]]),
+    ("bgb", [[8, 24, 32], [52, 104, 86], [136, 192, 112], [224, 248, 208]]),
     ("pocket", [[57, 57, 57], [117, 117, 117], [176, 176, 176], [236, 236, 236]]),
+    ("bw", [[0, 0, 0], [85, 85, 85], [170, 170, 170], [255, 255, 255]]),
+    ("demichrome", [[33, 30, 32], [85, 85, 104], [160, 160, 139], [233, 239, 236]]),
+    ("icecream", [[124, 63, 88], [235, 107, 111], [249, 168, 117], [255, 246, 211]]),
+    ("kirokaze", [[51, 44, 80], [70, 135, 143], [148, 227, 68], [226, 243, 228]]),
     ("color", [[30, 30, 110], [100, 100, 180], [240, 200, 90], [250, 250, 200]]),
 ];
 
@@ -74,5 +78,17 @@ mod tests {
         assert_eq!(parse_hex("#555").unwrap(), [85, 85, 85]);
         assert_eq!(parse_hex("0f380f").unwrap(), [15, 56, 15]);
         assert_eq!(colour_levels(&[0, 3], &by_name("bw").unwrap()), vec![0, 0, 0, 255, 255, 255]);
+    }
+
+    #[test]
+    fn builtins_are_ordered_dark_to_light() {
+        let lum = |c: Rgb| 0.2126 * c[0] as f64 + 0.7152 * c[1] as f64 + 0.0722 * c[2] as f64;
+        for (name, p) in BUILTIN.iter() {
+            for w in p.windows(2) {
+                assert!(lum(w[0]) <= lum(w[1]), "{name}: {w:?} not dark to light");
+            }
+        }
+        assert_eq!(by_name("kirokaze").unwrap()[0], [51, 44, 80]);
+        assert_eq!(resolve("BGB").unwrap(), by_name("bgb").unwrap());
     }
 }
