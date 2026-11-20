@@ -87,7 +87,7 @@ struct RenderKey {
     frame: Option<usize>,
     scale: usize,
     autocontrast: bool,
-    contrast: f64,
+    gamma: f64,
     fit: usize,
     proxy: bool,
     source_id: u64,
@@ -121,7 +121,9 @@ struct App {
     pixel_size: usize,
     fit_mode: usize,
     autocontrast: bool,
-    contrast: f64,
+    gamma: f64,
+    /// Leftover wheel points on the gamma slider, spent in 0.05 steps once a full line is reached.
+    gamma_wheel_acc: f32,
     snap_pixels: bool,
     guides: Guides,
     format: Format,
@@ -175,6 +177,20 @@ pub fn run(cli: Cli) -> Result<(), String> {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, cli: Cli) -> App {
+        Self::build(&cc.egui_ctx, cli)
+    }
+
+    fn build(ctx: &egui::Context, cli: Cli) -> App {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "symbols".to_owned(),
+            egui::FontData::from_static(include_bytes!("../assets/fonts/symbols.ttf")),
+        );
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().push("symbols".to_owned());
+        }
+        ctx.set_fonts(fonts);
+
         let mut status = String::new();
 
         // Frames: built-ins first (all assets/frame_<id>.bin), then the frames folders.
@@ -224,7 +240,8 @@ impl App {
             pixel_size: cli.pixel_size,
             fit_mode: fit_mode_of(cli.crop_mode),
             autocontrast: cli.autocontrast,
-            contrast: cli.contrast,
+            gamma: cli.gamma,
+            gamma_wheel_acc: 0.0,
             snap_pixels: false,
             guides: Guides::Thirds,
             format: cli.format,
@@ -248,7 +265,7 @@ impl App {
             dnd_native_wayland: wayland_native(),
         };
         if let Some(first) = app.cli.inputs.first().cloned() {
-            app.load(&cc.egui_ctx, &first);
+            app.load(ctx, &first);
         }
         app
     }
@@ -276,8 +293,8 @@ impl App {
             }
         };
         let (w, h) = (rgb.w, rgb.h);
-        let gray = rgb.to_gray();
         let longest = w.max(h);
+        let gray = rgb.to_gray();
 
         let shown = if longest > DISPLAY_MAX {
             let s = DISPLAY_MAX as f64 / longest as f64;
@@ -346,7 +363,7 @@ impl App {
             frame: self.frame(),
             frame_scale: self.frame_scale,
             autocontrast: self.autocontrast,
-            contrast: self.contrast,
+            gamma: self.gamma,
         }
     }
 
@@ -371,7 +388,7 @@ impl App {
             frame: self.frame_idx,
             scale: self.frame_scale,
             autocontrast: self.autocontrast,
-            contrast: self.contrast,
+            gamma: self.gamma,
             fit: self.fit_mode,
             proxy: use_proxy,
             source_id: self.source_id,
@@ -499,7 +516,7 @@ impl App {
         self.pixel_size = self.cli.pixel_size;
         self.fit_mode = fit_mode_of(self.cli.crop_mode);
         self.autocontrast = self.cli.autocontrast;
-        self.contrast = self.cli.contrast;
+        self.gamma = self.cli.gamma;
         self.snap_pixels = false;
         self.frame_scale = self.cli.scale;
         self.format = self.cli.format;
@@ -520,6 +537,47 @@ impl App {
         self.drag = None;
         self.last_key = None;
         self.status = "Settings reset to startup values.".to_string();
+    }
+
+    /// A command line that re-renders the current image with the current settings.
+    /// The crop position is decided interactively in the window, so it is not part of it.
+    fn cli_command(&self) -> String {
+        let input = self.source.as_ref().map(|s| s.path.clone()).unwrap_or_else(|| "input.png".to_string());
+        let mut cmd = format!("ddn-dither {input}");
+        match self.frame() {
+            Some(f) => {
+                cmd.push_str(&format!(" --frame {}", f.name));
+                if self.frame_scale != 4 {
+                    cmd.push_str(&format!(" --scale {}", self.frame_scale));
+                }
+            }
+            None => {
+                cmd.push_str(&format!(" -o {}x{}", self.out_w, self.out_h));
+                if self.pixel_size != 0 {
+                    cmd.push_str(&format!(" --pixel-size {}", self.pixel_size));
+                }
+                match self.fit_mode {
+                    1 => cmd.push_str(" --crop-mode contain"),
+                    2 => cmd.push_str(" --crop-mode pad"),
+                    _ => {}
+                }
+            }
+        }
+        if !self.autocontrast {
+            cmd.push_str(" --no-autocontrast");
+        }
+        if (self.gamma - 1.0).abs() > 1e-9 {
+            cmd.push_str(&format!(" --gamma {}", self.gamma));
+        }
+        if self.format != Format::Png {
+            cmd.push_str(" --format webp");
+        }
+        if self.pal_idx < palette::names().len() {
+            cmd.push_str(&format!(" -p {}", palette::BUILTIN[self.pal_idx].0));
+        } else {
+            cmd.push_str(&format!(" -p {}", self.custom_pal.join(",")));
+        }
+        cmd
     }
 
     /// With integer scaling on, keep the output size exactly as set and instead snap the
@@ -616,7 +674,6 @@ impl App {
         let info = self.frame().map(|f| (f.hole.w, f.hole.h, f.w, f.h, f.source_grey_values, f.hole_is_rect));
         let framed = info.is_some();
         if let Some((hole_w, hole_h, fw, fh, greys, hole_is_rect)) = info {
-            ui.add(egui::Label::new(format!("Window {hole_w}×{hole_h} px, frame {fw}×{fh} px")).truncate());
             if greys > 4 {
                 ui.add(egui::Label::new(egui::RichText::new(format!("Converted from {greys} grey values to 4 tones.")).color(Color32::from_rgb(200, 140, 0))).truncate());
             }
@@ -630,13 +687,13 @@ impl App {
             )
             .on_hover_text("Integer upscale of the framed image. ×4 makes 640×576 for the built-in frame.");
             let s = self.frame_scale.max(1);
-            ui.add(egui::Label::new(format!("Output {}×{} px (set by the frame)", fw * s, fh * s)).truncate());
+            ui.add(egui::Label::new(format!("Window {hole_w}×{hole_h} px → output {}×{} (×{s})", fw * s, fh * s)).truncate());
         }
         ui.separator();
 
-        // ---- size / aspect
+        // ---- output size
         ui.add_enabled_ui(!framed, |ui| {
-            ui.strong("Size & crop");
+            ui.strong("Output size");
             let before_idx = self.aspect_idx;
             egui::ComboBox::from_id_salt("aspect")
                 .selected_text(format!("Aspect: {}", ASPECT_PRESETS[self.aspect_idx].0))
@@ -655,6 +712,7 @@ impl App {
             }
             let (ow, oh, old_ps, snap_before) = (self.out_w, self.out_h, self.pixel_size, self.snap_pixels);
             ui.horizontal(|ui| {
+                ui.spacing_mut().interact_size.x = 64.0;
                 ui.label("W");
                 ui.add(egui::DragValue::new(&mut self.out_w).range(1..=16384));
                 ui.label("H");
@@ -670,6 +728,11 @@ impl App {
             })
             .response
             .on_hover_text("Output size in pixels. With an aspect preset, changing one side adjusts the other.");
+            ui.checkbox(&mut self.snap_pixels, "Integer scale")
+                .on_hover_text(
+                    "Replaces the pixel-size slider while it is on: only sizes that divide your output exactly are offered, so every dither block stays a whole, uncropped N×N and the output size is never changed (turning it off brings the free slider back).",
+                )
+                .changed();
             if self.aspect_idx != 0 {
                 let a = ASPECT_PRESETS[self.aspect_idx].1;
                 if self.out_w != ow {
@@ -725,53 +788,103 @@ impl App {
                     "Output pixels per dithered pixel; the readout shows the resulting grid size (pixels across = grid width) and whether any row/column of the output would be cropped. The Game Boy Camera shot a 128×112 grid; bigger = blockier.",
                 );
             }
-            ui.checkbox(&mut self.snap_pixels, "Integer scale")
-                .on_hover_text(
-                    "Replaces the pixel-size slider while it is on: only sizes that divide your output exactly are offered, so every dither block stays a whole, uncropped N×N and the output size is never changed (turning it off brings the free slider back).",
-                )
-                .changed();
             if self.snap_pixels
                 && (self.pixel_size != old_ps || self.out_w != ow || self.out_h != oh || self.snap_pixels != snap_before)
             {
                 self.snap_pixels_to_output();
             }
         });
-        if ui
-            .button(format!("Guides: {}", self.guides.name()))
-            .on_hover_text("Guide lines over the crop box to help alignment: rule-of-thirds lines and/or a full-size crosshair through the crop centre.")
-            .clicked()
-        {
-            self.guides = self.guides.next();
-        }
-        ui.horizontal(|ui| {
-            ui.label("Fit");
-            for (i, name) in ["Crop", "Pad", "Edge pad"].iter().enumerate() {
-                if ui.selectable_label(self.fit_mode == i, *name).clicked() {
-                    self.fit_mode = i;
+        ui.separator();
+
+        // ---- crop
+        ui.add_enabled_ui(!framed, |ui| {
+            ui.strong("Crop");
+            ui.horizontal(|ui| {
+                ui.label("Fit");
+                for (i, name) in ["Crop", "Pad", "Edge pad"].iter().enumerate() {
+                    if ui.selectable_label(self.fit_mode == i, *name).clicked() {
+                        self.fit_mode = i;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("How the picture fills the output. Crop: centre-crop to the output aspect. Pad: scale the whole picture in and fill the rest with the darkest tone. Edge pad: fill the rest by repeating the picture's outermost rows and columns, so the image looks smeared out to the edges.");
+            if self.fit_mode == 0 {
+                if let Some((iw, ih)) = self.source.as_ref().map(|s| (s.w as f64, s.h as f64)) {
+                    let c = self.crop;
+                    let (mut x, mut y, mut w, mut h) = (c.x, c.y, c.w, c.h);
+                    let (bx, by, bw, bh) = (x, y, w, h);
+                    let grid = egui::Grid::new("crop_fields").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
+                        ui.spacing_mut().interact_size.x = 64.0;
+                        ui.label("X");
+                        ui.add(egui::DragValue::new(&mut x).speed(0.5).range(0.0..=iw));
+                        ui.label("Y");
+                        ui.add(egui::DragValue::new(&mut y).speed(0.5).range(0.0..=ih));
+                        ui.end_row();
+                        ui.label("W");
+                        ui.add(egui::DragValue::new(&mut w).speed(0.5).range(1.0..=iw));
+                        ui.label("H");
+                        ui.add(egui::DragValue::new(&mut h).speed(0.5).range(1.0..=ih));
+                        ui.end_row();
+                    });
+                    grid.response.on_hover_text("Exact crop position and size in source pixels. They follow the box while you drag it; typing or dragging a number moves the box. W or H snaps to the aspect ratio (the one you edit wins), values clamp to the picture. Hold Shift with the arrow keys to nudge by 10.");
+                    if (x, y) != (bx, by) {
+                        self.crop = CropBox { x, y, w: c.w, h: c.h }.clamped_position(iw, ih);
+                    }
+                    if (w, h) != (bw, bh) {
+                        let min_w = 24.0_f64.min(iw / 4.0);
+                        let aspect = self.aspect();
+                        let mut wp = w.round().clamp(min_w, iw);
+                        if h != bh && w == bw {
+                            wp = (h.round().clamp(1.0, ih) * aspect).round().clamp(min_w, iw);
+                        }
+                        let mut hp = (wp / aspect).round();
+                        if hp > ih {
+                            hp = ih;
+                            wp = (hp * aspect).round().clamp(min_w, iw);
+                            hp = (wp / aspect).round().min(ih);
+                        }
+                        self.crop = CropBox { x: c.x, y: c.y, w: wp, h: hp }.clamped_position(iw, ih);
+                    }
                 }
             }
-        })
-        .response
-        .on_hover_text("How the picture fills the output. Crop: centre-crop to the output aspect. Pad: scale the whole picture in and fill the rest with the darkest tone. Edge pad: fill the rest by repeating the picture's outermost rows and columns, so the image looks smeared out to the edges.");
+        });
         ui.separator();
 
         // ---- contrast
         ui.strong("Contrast");
-        ui.checkbox(&mut self.autocontrast, "Auto contrast")
+        ui.checkbox(&mut self.autocontrast, "Auto")
             .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
         ui.horizontal(|ui| {
-            ui.label("Contrast");
-            ui.add(
-                egui::Slider::new(&mut self.contrast, 0.25..=4.0)
+            ui.label("Gamma");
+            let sresp = ui.add(
+                egui::Slider::new(&mut self.gamma, 0.25..=4.0)
+                    .step_by(0.05)
                     .custom_formatter(|n, _| format!("{n:.2}"))
                     .custom_parser(|s| s.trim().parse::<f64>().ok()),
             );
-            if ui.small_button("Reset").on_hover_text("Back to no extra contrast (1.00)").clicked() {
-                self.contrast = 1.0;
+            if sresp.hovered() {
+                let dy = ui.input(|i| i.raw_scroll_delta.y);
+                if dy != 0.0 {
+                    self.gamma_wheel_acc += dy;
+                    let steps = (self.gamma_wheel_acc / 8.0).trunc() as f64;
+                    if steps != 0.0 {
+                        self.gamma_wheel_acc -= (steps * 8.0) as f32;
+                        self.gamma = (self.gamma + steps * 0.05).clamp(0.25, 4.0);
+                        self.gamma = (self.gamma / 0.05).round() * 0.05;
+                    }
+                    ui.input_mut(|i| {
+                        i.raw_scroll_delta = egui::Vec2::ZERO;
+                        i.smooth_scroll_delta = egui::Vec2::ZERO;
+                    });
+                }
+            }
+            if ui.small_button("Reset").on_hover_text("Back to no gamma (1.00)").clicked() {
+                self.gamma = 1.0;
             }
         })
         .response
-        .on_hover_text("Manual contrast around mid-grey, applied after auto contrast. 1.00 = no change.");
+        .on_hover_text("Gamma curve before the auto-contrast stretch, so the shape survives the stretch. Below 1.00 brightens shadows and midtones (0.50 turns a 25% grey into 50%), above 1.00 darkens. 1.00 = no change. Arrow keys, mouse wheel over the box or dragging all move in 0.05 steps.");
         ui.separator();
 
         // ---- palette
@@ -930,6 +1043,15 @@ impl App {
                 self.save_as();
             }
         });
+        ui.add_space(6.0);
+        if ui
+            .button("Copy command line")
+            .on_hover_text("Puts a command line with the current size, pixel size, fit mode, gamma, format, palette and frame onto the clipboard, so the current render can be reproduced in a script. The crop position itself is chosen in the window, so the command crops to the output aspect instead.")
+            .clicked()
+        {
+            ctx.copy_text(self.cli_command());
+            self.status = "Command line copied.".to_string();
+        }
         if have {
             let dest = match &self.output_override {
                 Some(p) => p.clone(),
@@ -950,7 +1072,7 @@ impl App {
         ui.vertical_centered_justified(|ui| {
             if ui
                 .small_button("Reset all settings")
-                .on_hover_text("Return every option to its startup value: size, pixel size, contrast, frame selection and scale, palette, crop box.")
+                .on_hover_text("Return every option to its startup value: size, pixel size, gamma, frame selection and scale, palette, crop box.")
                 .clicked()
             {
                 self.reset_settings();
@@ -972,6 +1094,7 @@ impl App {
             return;
         };
 
+        let framed_src = self.frame().is_some();
         let avail = ui.available_size();
         const IMG_PAD: f32 = 14.0;
         let source_h = (avail.y * 0.58).max(160.0 + 2.0 * IMG_PAD);
@@ -1082,6 +1205,18 @@ impl App {
             painter.rect_filled(area, 0.0, Color32::from_black_alpha(160));
             painter.text(area.center(), egui::Align2::CENTER_CENTER, "Release to open", egui::FontId::proportional(22.0), Color32::WHITE);
         }
+
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(!framed_src, egui::Button::new(format!("Guides: {}", self.guides.name())))
+                    .on_hover_text("Guide lines over the crop box to help alignment: rule-of-thirds lines and/or a full-size crosshair through the crop centre.")
+                    .clicked()
+                {
+                    self.guides = self.guides.next();
+                }
+            });
+        });
 
         // ---- live preview
         ui.separator();
@@ -1283,9 +1418,41 @@ impl eframe::App for App {
             self.load(ctx, &p.to_string_lossy());
         }
 
-        // Keyboard: Esc closes the window
+        // Keyboard: Esc closes the window; Ctrl+O open, Ctrl+S save, arrows nudge the crop
         if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if !ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::O)) {
+                self.open_dialog(ctx);
+            } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
+                self.quick_save(ctx);
+            } else if self.fit_mode == 0 && self.drag.is_none() {
+                let (dl, dr, du, dd) = ctx.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::ArrowLeft),
+                        i.key_pressed(egui::Key::ArrowRight),
+                        i.key_pressed(egui::Key::ArrowUp),
+                        i.key_pressed(egui::Key::ArrowDown),
+                    )
+                });
+                let step = if ctx.input(|i| i.modifiers.shift) { 10.0 } else { 1.0 };
+                let (dx, dy) = ((dr as i32 - dl as i32) as f64 * step, (dd as i32 - du as i32) as f64 * step);
+                if (dx != 0.0 || dy != 0.0) && self.source.is_some() {
+                    let (iw, ih) = self.source.as_ref().map(|s| (s.w as f64, s.h as f64)).unwrap();
+                    let c = self.crop;
+                    self.crop = CropBox::drag(
+                        &c,
+                        Handle::Move,
+                        (c.x, c.y),
+                        (c.x + dx, c.y + dy),
+                        self.aspect(),
+                        iw,
+                        ih,
+                        24.0_f64.min(iw / 4.0),
+                    );
+                }
+            }
         }
 
         egui::SidePanel::right("options")
@@ -1326,5 +1493,48 @@ mod tests {
     #[test]
     fn snapping_never_exceeds_the_slider_range() {
         assert_eq!(snap_pixel_size(800, 400, 60), 25);
+    }
+}
+
+#[cfg(test)]
+mod interaction {
+    use super::*;
+    use eframe::App as _;
+
+    #[test]
+    fn opening_an_image_keeps_the_crop_box_across_idle_frames() {
+        let (w, h) = (1200u32, 800u32);
+        let mut data = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                data.push((x % 256) as u8);
+                data.push((y % 256) as u8);
+                data.push(128);
+            }
+        }
+        let path = std::env::temp_dir().join("ddn_dither_crop_regression.png");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut enc = png::Encoder::new(file, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&data).unwrap();
+
+        let ctx = egui::Context::default();
+        let cli = cli::parse(&["ddn-dither".to_string()]).unwrap();
+        let mut app = App::build(&ctx, cli);
+        app.load(&ctx, path.to_str().unwrap());
+        let before = app.crop;
+        assert!(before.w > 100.0 && before.h > 100.0, "crop collapsed right after load: {before:?}");
+
+        let frame: &mut eframe::Frame = Box::leak(Box::new(unsafe {
+            std::mem::MaybeUninit::<eframe::Frame>::zeroed().assume_init()
+        }));
+        for k in 0..4 {
+            let ri = egui::RawInput { time: Some(k as f64), ..Default::default() };
+            let _ = ctx.run(ri, |ctx| app.update(ctx, frame));
+        }
+        assert_eq!(app.crop, before, "idle frames changed the crop box");
+        assert!(ctx.fonts(|f| f.has_glyphs(&egui::FontId::proportional(14.0), "⇄→✓")), "symbol fallback font missing glyphs");
+        let _ = std::fs::remove_file(&path);
     }
 }

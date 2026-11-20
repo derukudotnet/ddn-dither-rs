@@ -46,7 +46,7 @@ ddn-dither                                # window, drop an image onto it
 * Size: aspect presets + width/height (with a swap button). With a preset the other dimension
   follows; choose *Custom* to set both freely. The crop box always has exactly the output's
   aspect ratio.
-* **Integer scale** (Size & crop) keeps the dither blocks whole and uncropped *without
+* **Integer scale** (Output size) keeps the dither blocks whole and uncropped *without
   changing your output size*: while it is on, the pixel-size slider is replaced by one-click
   choices for exactly the values that divide width and height (800×350, for instance, allows
   1, 2, 5, 10, 25, 50, plus *auto*); the effective one is marked. Turning it off brings the
@@ -65,15 +65,26 @@ ddn-dither                                # window, drop an image onto it
   header also shows the output resolution and the dither grid with the effective pixel size
   (e.g. `800×350 px · 400×175 grid · ×2`), so you can read the result without scanning the sidebar.
 * **Reset all settings** (bottom of the sidebar) returns every option to its startup value —
-  size, pixel size, contrast, frame selection and scale, palette, and the crop box — as if the
+  size, pixel size, gamma, frame selection and scale, palette, and the crop box — as if the
   app were restarted with the same image, without closing it.
-* **Contrast** slider boosts or softens contrast around mid-grey, on top of auto contrast (1.00 = no change).
+* **Copy command line** puts a `ddn-dither …` command with the current size, pixel size, fit
+  mode, gamma, format, palette and frame onto the clipboard, so a render can be reproduced
+  (or batched) exactly in a script. The crop position itself is chosen in the window, so the
+  command uses the default centre-crop.
+* **Gamma** curves the image before the auto-contrast stretch, so the curve shape survives the stretch
+  (1.00 = no change). Values below 1.00 brighten shadows and midtones — handy for revealing detail in dark
+  photos — values above 1.00 darken.
 * **Guides** over the crop box: rule-of-thirds lines or a crosshair through the crop centre, to help alignment.
+* **Keyboard**: arrow keys nudge the crop box by one source pixel (Shift = 10), Ctrl+S saves,
+  Ctrl+O opens an image, Esc closes the window.
+* **Exact crop fields**: X/Y (position) and W/H (size) of the crop box, in source pixels, two-way
+  synced with the box; typing or dragging a number moves/resizes the box, W or H follows the
+  active aspect ratio and everything clamps to the picture.
 * **Fit** chooses how the picture fills the output: **Crop** centre-crops, **Pad** scales the
   whole picture in and fills the rest with the darkest tone, **Edge pad** fills the rest by
   repeating the picture's outermost rows and columns (a smeared-out extension of the image
   border; sometimes it hides dithering seams better than dark padding).
-* Palette: ddn (default), green, bgb, pocket, bw, demichrome, icecream, kirokaze, color, or your own four hex colours (darkest first; 3-digit shorthand like `#0f0` works). The palette dropdown shows a mini swatch strip for each entry, the custom editor is one colour-filled text box per colour (boxes can be reordered by dragging their grip), and picking a built-in palette fills the boxes so you can fine-tune from there.
+* Palette: ddn (default), green, bgb, pocket, bw, demichrome, icecream, kirokaze, color, or your own four hex colours (darkest first; 3-digit shorthand like `#0f0` works). The palette dropdown shows a mini swatch strip for each entry, the custom editor is one colour-filled text box per colour (boxes can be reordered by dragging their grip) and picking a built-in palette fills the boxes so you can fine-tune from there.
 * Switching palette or recolouring happens instantly — the dithered grid is cached and only recoloured.
 * Every control has a tooltip; hover (or long-press) it for details.
 * Drag & drop from a file manager works on X11 and on Windows/macOS. On native Wayland the
