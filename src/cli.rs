@@ -28,8 +28,8 @@ OPTIONS:
                               --help shows the compiled-in ids; default picks the first.
         --scale N             Integer upscale for framed output (default 4 -> 640x576)
         --no-autocontrast     Skip the contrast stretch before dithering
-        --contrast GAIN       Manual contrast around mid-grey (1.0 = no change,
-                              e.g. 1.5)
+        --gamma GAMMA         Gamma curve before the contrast stretch (1.0 = no
+                              change; <1 brightens shadows, >1 darkens)
     -f, --format png|webp     Format when the output name is generated (default png)
     -O, --output PATH         Output file (default: INPUT_dithered.png; one input only)
         --gui                 Open the window
@@ -89,8 +89,8 @@ pub struct Cli {
     pub frame: FrameSel,
     pub scale: usize,
     pub autocontrast: bool,
-    /// Manual contrast gain around mid-grey; 1.0 = no change.
-    pub contrast: f64,
+    /// Gamma before the contrast stretch; 1.0 = no change.
+    pub gamma: f64,
     pub gui: bool,
     pub debug: bool,
     pub help: bool,
@@ -113,7 +113,7 @@ impl Default for Cli {
             frame: FrameSel::None,
             scale: 4,
             autocontrast: true,
-            contrast: 1.0,
+            gamma: 1.0,
             gui: false,
             debug: false,
             help: false,
@@ -181,13 +181,13 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             "-d" | "--debug" => c.debug = true,
             "--gui" => c.gui = true,
             "--no-autocontrast" => c.autocontrast = false,
-            "--contrast" => {
+            "--gamma" => {
                 let v = value(&key)?;
                 let n: f64 = v.trim().parse().map_err(|_| format!("{key} needs a number, got '{v}'"))?;
-                if !n.is_finite() || n < 0.0 {
-                    return Err(format!("--contrast must be at least 0, got '{v}'"));
+                if !n.is_finite() || n <= 0.0 {
+                    return Err(format!("--gamma must be greater than 0, got '{v}'"));
                 }
-                c.contrast = n;
+                c.gamma = n;
             }
             "-o" | "--output-size" => c.output_size = Some(parse_size(&value(&key)?)?),
             "--output-width" => {
@@ -351,14 +351,14 @@ mod tests {
     }
 
     #[test]
-    fn contrast_is_parsed() {
-        let c = parse(&a(&["--contrast", "1.5", "x.jpg"])).unwrap();
-        assert_eq!(c.contrast, 1.5);
-        let c = parse(&a(&["--contrast=0.5", "x.jpg"])).unwrap();
-        assert_eq!(c.contrast, 0.5);
-        assert_eq!(parse(&a(&["--contrast"])).unwrap_err(), "--contrast needs a value");
-        assert!(parse(&a(&["--contrast", "x"])).is_err());
-        assert!(parse(&a(&["--contrast", "-1"])).is_err());
+    fn gamma_is_parsed() {
+        let c = parse(&a(&["--gamma", "1.5", "x.jpg"])).unwrap();
+        assert_eq!(c.gamma, 1.5);
+        let c = parse(&a(&["--gamma=0.5", "x.jpg"])).unwrap();
+        assert_eq!(c.gamma, 0.5);
+        assert_eq!(parse(&a(&["--gamma"])).unwrap_err(), "--gamma needs a value");
+        assert!(parse(&a(&["--gamma", "x"])).is_err());
+        assert!(parse(&a(&["--gamma", "0"])).is_err());
     }
 
     #[test]

@@ -87,7 +87,7 @@ struct RenderKey {
     frame: Option<usize>,
     scale: usize,
     autocontrast: bool,
-    contrast: f64,
+    gamma: f64,
     fit: usize,
     proxy: bool,
     source_id: u64,
@@ -121,7 +121,7 @@ struct App {
     pixel_size: usize,
     fit_mode: usize,
     autocontrast: bool,
-    contrast: f64,
+    gamma: f64,
     snap_pixels: bool,
     guides: Guides,
     format: Format,
@@ -238,7 +238,7 @@ impl App {
             pixel_size: cli.pixel_size,
             fit_mode: fit_mode_of(cli.crop_mode),
             autocontrast: cli.autocontrast,
-            contrast: cli.contrast,
+            gamma: cli.gamma,
             snap_pixels: false,
             guides: Guides::Thirds,
             format: cli.format,
@@ -360,7 +360,7 @@ impl App {
             frame: self.frame(),
             frame_scale: self.frame_scale,
             autocontrast: self.autocontrast,
-            contrast: self.contrast,
+            gamma: self.gamma,
         }
     }
 
@@ -385,7 +385,7 @@ impl App {
             frame: self.frame_idx,
             scale: self.frame_scale,
             autocontrast: self.autocontrast,
-            contrast: self.contrast,
+            gamma: self.gamma,
             fit: self.fit_mode,
             proxy: use_proxy,
             source_id: self.source_id,
@@ -513,7 +513,7 @@ impl App {
         self.pixel_size = self.cli.pixel_size;
         self.fit_mode = fit_mode_of(self.cli.crop_mode);
         self.autocontrast = self.cli.autocontrast;
-        self.contrast = self.cli.contrast;
+        self.gamma = self.cli.gamma;
         self.snap_pixels = false;
         self.frame_scale = self.cli.scale;
         self.format = self.cli.format;
@@ -563,8 +563,8 @@ impl App {
         if !self.autocontrast {
             cmd.push_str(" --no-autocontrast");
         }
-        if (self.contrast - 1.0).abs() > 1e-9 {
-            cmd.push_str(&format!(" --contrast {}", self.contrast));
+        if (self.gamma - 1.0).abs() > 1e-9 {
+            cmd.push_str(&format!(" --gamma {}", self.gamma));
         }
         if self.format != Format::Png {
             cmd.push_str(" --format webp");
@@ -853,18 +853,18 @@ impl App {
         ui.checkbox(&mut self.autocontrast, "Auto")
             .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
         ui.horizontal(|ui| {
-            ui.label("Manual");
+            ui.label("Gamma");
             ui.add(
-                egui::Slider::new(&mut self.contrast, 0.25..=4.0)
+                egui::Slider::new(&mut self.gamma, 0.25..=4.0)
                     .custom_formatter(|n, _| format!("{n:.2}"))
                     .custom_parser(|s| s.trim().parse::<f64>().ok()),
             );
-            if ui.small_button("Reset").on_hover_text("Back to no extra contrast (1.00)").clicked() {
-                self.contrast = 1.0;
+            if ui.small_button("Reset").on_hover_text("Back to no gamma (1.00)").clicked() {
+                self.gamma = 1.0;
             }
         })
         .response
-        .on_hover_text("Manual contrast around mid-grey, applied after auto contrast. 1.00 = no change.");
+        .on_hover_text("Gamma curve before the auto-contrast stretch, so the shape survives the stretch. Below 1.00 brightens shadows and midtones (0.50 turns a 25% grey into 50%), above 1.00 darkens. 1.00 = no change.");
         ui.separator();
 
         // ---- palette
@@ -1026,7 +1026,7 @@ impl App {
         ui.add_space(6.0);
         if ui
             .button("Copy command line")
-            .on_hover_text("Puts a command line with the current size, pixel size, fit mode, contrast, format, palette and frame onto the clipboard, so the current render can be reproduced in a script. The crop position itself is chosen in the window, so the command crops to the output aspect instead.")
+            .on_hover_text("Puts a command line with the current size, pixel size, fit mode, gamma, format, palette and frame onto the clipboard, so the current render can be reproduced in a script. The crop position itself is chosen in the window, so the command crops to the output aspect instead.")
             .clicked()
         {
             ctx.copy_text(self.cli_command());
@@ -1052,7 +1052,7 @@ impl App {
         ui.vertical_centered_justified(|ui| {
             if ui
                 .small_button("Reset all settings")
-                .on_hover_text("Return every option to its startup value: size, pixel size, contrast, frame selection and scale, palette, crop box.")
+                .on_hover_text("Return every option to its startup value: size, pixel size, gamma, frame selection and scale, palette, crop box.")
                 .clicked()
             {
                 self.reset_settings();
