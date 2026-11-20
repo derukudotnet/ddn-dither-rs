@@ -177,6 +177,10 @@ pub fn run(cli: Cli) -> Result<(), String> {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, cli: Cli) -> App {
+        Self::build(&cc.egui_ctx, cli)
+    }
+
+    fn build(ctx: &egui::Context, cli: Cli) -> App {
         let mut status = String::new();
 
         // Frames: built-ins first (all assets/frame_<id>.bin), then the frames folders.
@@ -250,7 +254,7 @@ impl App {
             dnd_native_wayland: wayland_native(),
         };
         if let Some(first) = app.cli.inputs.first().cloned() {
-            app.load(&cc.egui_ctx, &first);
+            app.load(ctx, &first);
         }
         app
     }
@@ -806,7 +810,7 @@ impl App {
         if !framed && self.fit_mode == 0 {
             if let Some((iw, ih)) = self.source.as_ref().map(|s| (s.w as f64, s.h as f64)) {
                 let c = self.crop;
-                let (mut x, mut y, mut w, mut h) = (c.x * iw, c.y * ih, c.w * iw, c.h * ih);
+                let (mut x, mut y, mut w, mut h) = (c.x, c.y, c.w, c.h);
                 let (bx, by, bw, bh) = (x, y, w, h);
                 ui.horizontal(|ui| {
                     ui.label("X");
@@ -815,7 +819,7 @@ impl App {
                     ui.add(egui::DragValue::new(&mut y).speed(0.5).range(0.0..=ih).suffix(" px"));
                 });
                 if (x, y) != (bx, by) {
-                    self.crop = CropBox { x: (x / iw).max(0.0), y: (y / ih).max(0.0), w: c.w, h: c.h }.clamped_position(iw, ih);
+                    self.crop = CropBox { x, y, w: c.w, h: c.h }.clamped_position(iw, ih);
                 }
                 ui.horizontal(|ui| {
                     ui.label("W");
@@ -838,7 +842,7 @@ impl App {
                         wp = (hp * aspect).round().clamp(min_w, iw);
                         hp = (wp / aspect).round().min(ih);
                     }
-                    self.crop = CropBox { x: c.x, y: c.y, w: wp / iw, h: hp / ih }.clamped_position(iw, ih);
+                    self.crop = CropBox { x: c.x, y: c.y, w: wp, h: hp }.clamped_position(iw, ih);
                 }
             }
         }
@@ -891,7 +895,9 @@ impl App {
             .clicked()
         {
             if let Some((pal, hexes)) = self.source.as_ref().map(|s| {
-                let p = dominant_palette(&s.mini, &self.crop);
+                let (sx, sy) = (s.mini.w as f64 / s.w.max(1) as f64, s.mini.h as f64 / s.h.max(1) as f64);
+                let mc = CropBox { x: self.crop.x * sx, y: self.crop.y * sy, w: self.crop.w * sx, h: self.crop.h * sy };
+                let p = dominant_palette(&s.mini, &mc);
                 (
                     p,
                     p.iter().map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])).collect::<Vec<_>>().try_into().unwrap_or_else(|_| [(); 4].map(|()| String::new())),
@@ -1331,10 +1337,10 @@ fn swatch_strip(ui: &mut egui::Ui, pal: &Palette) {
 /// Pick the four dominant colours of the crop region (4-bit-per-channel buckets, largest first),
 /// ordered darkest to lightest. Falls back to a grey ramp when fewer than four buckets exist.
 fn dominant_palette(img: &RgbImage, crop: &CropBox) -> Palette {
-    let x0 = (crop.x * img.w as f64).floor().max(0.0) as usize;
-    let y0 = (crop.y * img.h as f64).floor().max(0.0) as usize;
-    let x1 = (((crop.x + crop.w) * img.w as f64).ceil() as usize).clamp(x0 + 1, img.w);
-    let y1 = (((crop.y + crop.h) * img.h as f64).ceil() as usize).clamp(y0 + 1, img.h);
+    let x0 = (crop.x.max(0.0) as usize).min(img.w.saturating_sub(1));
+    let y0 = (crop.y.max(0.0) as usize).min(img.h.saturating_sub(1));
+    let x1 = ((crop.x + crop.w) as usize).clamp(x0 + 1, img.w);
+    let y1 = ((crop.y + crop.h) as usize).clamp(y0 + 1, img.h);
     let step = ((((x1 - x0) * (y1 - y0)) as f64 / 4096.0).sqrt().ceil() as usize).max(1);
     let mut counts = vec![0u32; 4096];
     let mut sums = vec![0u64; 3 * 4096];
@@ -1529,14 +1535,14 @@ mod tests {
         fill(45, 58, [255, 255, 255]);
         fill(58, 64, [0, 0, 0]);
         let img = RgbImage::new(w, h, data);
-        let pal = dominant_palette(&img, &CropBox { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+        let pal = dominant_palette(&img, &CropBox { x: 0.0, y: 0.0, w: 64.0, h: 64.0 });
         assert_eq!(pal, [[0, 0, 0], [0, 0, 255], [255, 0, 0], [255, 255, 255]]);
     }
 
     #[test]
     fn dominant_palette_falls_back_to_a_ramp_for_uniform_images() {
         let img = RgbImage::new(8, 8, vec![100u8; 8 * 8 * 3]);
-        let pal = dominant_palette(&img, &CropBox { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+        let pal = dominant_palette(&img, &CropBox { x: 0.0, y: 0.0, w: 8.0, h: 8.0 });
         assert_eq!(pal[0], [100, 100, 100]);
         assert_eq!(pal[0], pal[3]);
     }
@@ -1554,7 +1560,7 @@ mod tests {
             }
         }
         let img = RgbImage::new(wsz, hsz, data);
-        let pal = dominant_palette(&img, &CropBox { x: 0.5, y: 0.0, w: 0.5, h: 1.0 });
+        let pal = dominant_palette(&img, &CropBox { x: 16.0, y: 0.0, w: 16.0, h: 32.0 });
         assert_eq!(pal[0], [0, 0, 0]);
         assert_eq!(pal[3], [255, 255, 255]);
     }
@@ -1580,5 +1586,47 @@ mod tests {
     #[test]
     fn snapping_never_exceeds_the_slider_range() {
         assert_eq!(snap_pixel_size(800, 400, 60), 25);
+    }
+}
+
+#[cfg(test)]
+mod interaction {
+    use super::*;
+    use eframe::App as _;
+
+    #[test]
+    fn opening_an_image_keeps_the_crop_box_across_idle_frames() {
+        let (w, h) = (1200u32, 800u32);
+        let mut data = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                data.push((x % 256) as u8);
+                data.push((y % 256) as u8);
+                data.push(128);
+            }
+        }
+        let path = std::env::temp_dir().join("ddn_dither_crop_regression.png");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut enc = png::Encoder::new(file, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&data).unwrap();
+
+        let ctx = egui::Context::default();
+        let cli = cli::parse(&["ddn-dither".to_string()]).unwrap();
+        let mut app = App::build(&ctx, cli);
+        app.load(&ctx, path.to_str().unwrap());
+        let before = app.crop;
+        assert!(before.w > 100.0 && before.h > 100.0, "crop collapsed right after load: {before:?}");
+
+        let frame: &mut eframe::Frame = Box::leak(Box::new(unsafe {
+            std::mem::MaybeUninit::<eframe::Frame>::zeroed().assume_init()
+        }));
+        for k in 0..4 {
+            let ri = egui::RawInput { time: Some(k as f64), ..Default::default() };
+            let _ = ctx.run(ri, |ctx| app.update(ctx, frame));
+        }
+        assert_eq!(app.crop, before, "idle frames changed the crop box");
+        let _ = std::fs::remove_file(&path);
     }
 }
