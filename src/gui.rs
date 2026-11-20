@@ -520,24 +520,15 @@ impl App {
         self.status = "Settings reset to startup values.".to_string();
     }
 
-    /// With integer scaling on, round width/height to the nearest multiple of the pixel size
-    /// so no output row or column is cropped away.
-    fn snap_output(&mut self) {
-        if self.pixel_size == 0 {
+    /// With integer scaling on, keep the output size exactly as set and instead snap the
+    /// pixel size to the nearest value that divides both sides, so every dither block is a
+    /// whole, uncropped N x N and the resolution the user asked for is preserved.
+    fn snap_pixels_to_output(&mut self) {
+        let eff = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
+        if self.out_w.is_multiple_of(eff) && self.out_h.is_multiple_of(eff) {
             return;
         }
-        let ps = self.pixel_size.max(1);
-        let nw = ((self.out_w as f64 / ps as f64).round() as usize).max(1) * ps;
-        let nh = ((self.out_h as f64 / ps as f64).round() as usize).max(1) * ps;
-        if nw != self.out_w || nh != self.out_h {
-            self.out_w = nw;
-            self.out_h = nh;
-            let a = self.out_w as f64 / self.out_h as f64;
-            self.aspect_idx = ASPECT_PRESETS
-                .iter()
-                .position(|(_, p)| *p > 0.0 && (p - a).abs() < 0.002)
-                .unwrap_or(0);
-        }
+        self.pixel_size = snap_pixel_size(self.out_w, self.out_h, eff);
     }
 
     fn open_dialog(&mut self, ctx: &egui::Context) {
@@ -710,13 +701,13 @@ impl App {
             );
             ui.checkbox(&mut self.snap_pixels, "Integer scale")
                 .on_hover_text(
-                    "Rounds width and height to an exact ×N of the pixel size so the dither grid fully covers the output and nothing is cropped. Overrules aspect presets when they disagree (the preset falls back to Custom).",
+                    "Keeps every dither block a whole, uncropped N×N without changing your output size: the pixel size snaps to the nearest value that divides width and height exactly (for 800×350 that is 1, 2, 5, 10, 25, 50…). With the pixel size on auto it only kicks in when the automatic value does not divide the output.",
                 )
                 .changed();
             if self.snap_pixels
                 && (self.pixel_size != old_ps || self.out_w != ow || self.out_h != oh || self.snap_pixels != snap_before)
             {
-                self.snap_output();
+                self.snap_pixels_to_output();
             }
         });
         if ui
@@ -1119,6 +1110,13 @@ fn human_size(n: u64) -> String {
     }
 }
 
+fn snap_pixel_size(w: usize, h: usize, want: usize) -> usize {
+    (1..=32)
+        .filter(|ps| w.is_multiple_of(*ps) && h.is_multiple_of(*ps))
+        .min_by_key(|ps| (want as i64 - *ps as i64).abs())
+        .unwrap_or(1)
+}
+
 fn fit_mode_of(mode: CropMode) -> usize {
     match mode {
         CropMode::Contain => 1,
@@ -1180,5 +1178,33 @@ impl eframe::App for App {
 
         self.sync_crop_aspect();
         self.refresh_preview(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snap_pixel_size;
+
+    #[test]
+    fn snapping_keeps_valid_pixel_sizes() {
+        assert_eq!(snap_pixel_size(800, 350, 2), 2);
+        assert_eq!(snap_pixel_size(800, 350, 4), 5);
+        assert_eq!(snap_pixel_size(800, 350, 5), 5);
+    }
+
+    #[test]
+    fn snapping_picks_the_nearest_divisor() {
+        assert_eq!(snap_pixel_size(800, 350, 3), 2);
+        assert_eq!(snap_pixel_size(800, 315, 4), 5);
+    }
+
+    #[test]
+    fn snapping_falls_back_to_one_when_nothing_divides() {
+        assert_eq!(snap_pixel_size(7, 5, 4), 1);
+    }
+
+    #[test]
+    fn snapping_never_exceeds_the_slider_range() {
+        assert_eq!(snap_pixel_size(800, 400, 60), 25);
     }
 }

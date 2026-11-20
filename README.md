@@ -45,9 +45,10 @@ ddn-dither                                # window, drop an image onto it
 * Size: aspect presets + width/height (with a swap button). With a preset the other dimension
   follows; choose *Custom* to set both freely. The crop box always has exactly the output's
   aspect ratio.
-* **Integer scale** (Size & crop) rounds width and height to the nearest multiple of the
-  pixel size, so the output is an exact ×N of the dither grid and no partial row/column
-  is cropped; the pixel-size row warns when a partial row/column would be cut off.
+* **Integer scale** (Size & crop) keeps the dither blocks whole and uncropped *without
+  changing your output size*: the pixel size snaps to the nearest value that divides width
+  and height exactly (800×350, for instance, allows 1, 2, 5, 10, 25, 50). Turn it off to use
+  any pixel size, letting a partial row/column be cut off (the pixel-size row warns).
 * **Pixel size** slider = output pixels per dithered pixel (whole numbers → crisp, even blocks).
   *auto* aims for about 384 dithered pixels across; the row shows the resulting grid size if you
   want to match the Camera's authentic 128×112 photo grid.
