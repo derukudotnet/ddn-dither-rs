@@ -814,18 +814,18 @@ impl App {
                 let (bx, by, bw, bh) = (x, y, w, h);
                 ui.horizontal(|ui| {
                     ui.label("X");
-                    ui.add(egui::DragValue::new(&mut x).speed(0.5).range(0.0..=iw).suffix(" px"));
+                    ui.add(egui::DragValue::new(&mut x).speed(0.5).range(0.0..=iw));
                     ui.label("Y");
-                    ui.add(egui::DragValue::new(&mut y).speed(0.5).range(0.0..=ih).suffix(" px"));
+                    ui.add(egui::DragValue::new(&mut y).speed(0.5).range(0.0..=ih));
                 });
                 if (x, y) != (bx, by) {
                     self.crop = CropBox { x, y, w: c.w, h: c.h }.clamped_position(iw, ih);
                 }
                 ui.horizontal(|ui| {
                     ui.label("W");
-                    ui.add(egui::DragValue::new(&mut w).speed(0.5).range(1.0..=iw).suffix(" px"));
+                    ui.add(egui::DragValue::new(&mut w).speed(0.5).range(1.0..=iw));
                     ui.label("H");
-                    ui.add(egui::DragValue::new(&mut h).speed(0.5).range(1.0..=ih).suffix(" px"));
+                    ui.add(egui::DragValue::new(&mut h).speed(0.5).range(1.0..=ih));
                 })
                 .response
                 .on_hover_text("Exact crop position and size in source pixels. They follow the box while you drag it; typing or dragging a number moves the box. W or H snaps to the aspect ratio (the one you edit wins), values clamp to the picture. Hold Shift with the arrow keys to nudge by 10.");
