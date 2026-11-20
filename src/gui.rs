@@ -948,18 +948,10 @@ impl App {
             let cb = self.crop;
             let crop_rect = Rect::from_min_max(to_screen(cb.x, cb.y), to_screen(cb.right(), cb.bottom()));
             let dim = Color32::from_black_alpha(140);
-            painter.rect_filled(Rect::from_min_max(img_rect.min, pos2(img_rect.max.x, crop_rect.min.y)), 0.0, dim);
-            painter.rect_filled(Rect::from_min_max(pos2(img_rect.min.x, crop_rect.max.y), img_rect.max), 0.0, dim);
-            painter.rect_filled(
-                Rect::from_min_max(pos2(img_rect.min.x, crop_rect.min.y), pos2(crop_rect.min.x, crop_rect.max.y)),
-                0.0,
-                dim,
-            );
-            painter.rect_filled(
-                Rect::from_min_max(pos2(crop_rect.max.x, crop_rect.min.y), pos2(img_rect.max.x, crop_rect.max.y)),
-                0.0,
-                dim,
-            );
+            painter.rect_filled(img_rect, 0.0, dim);
+            painter
+                .with_clip_rect(crop_rect)
+                .image(tex_id, img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             painter.rect_stroke(crop_rect, 0.0, Stroke::new(2.0_f32, Color32::WHITE));
             let c = crop_rect.center();
             for p in [
