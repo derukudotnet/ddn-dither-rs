@@ -53,7 +53,8 @@ ddn-dither                                # window, drop an image onto it
   pointer, dragging pans (grab cursor), double-click returns to Fit. Zoom and pan survive
   re-renders, so you can change pixel size and compare on exactly the same spot. At 100% the
   preview is pixel-for-pixel what the saved file contains — no need to save-and-check to judge
-  the result.
+  the result. The header also shows the exact size of the output file for the current
+  format (computed with the same encoder settings as saving, so it is the real number).
 * **Reset all settings** (bottom of the sidebar) returns every option to its startup value —
   size, pixel size, contrast, frame selection and scale, palette, and the crop box — as if the
   app were restarted with the same image, without closing it.
@@ -73,7 +74,8 @@ ddn-dither                                # window, drop an image onto it
 A frame is a PNG with a transparent rectangular window. Like the real Game Boy Camera's frames
 it uses **four grey levels**; the palette then recolours frame and photo together. A frame that
 has more greys is converted to four tones on load (with the same thresholds as the dither step)
-and the window tells you.
+and the window tells you. Frame names are shown prettified in the dropdown (`film_roll`
+becomes "Film Roll"); frame ids stay as-is for `--frame`.
 
 * Built in: the Deruku frame (160×144, 128×112 window).
 

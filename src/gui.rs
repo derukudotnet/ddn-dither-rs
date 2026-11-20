@@ -100,6 +100,9 @@ struct Preview {
     palette: Palette,
     /// Output pixels per dither pixel (rendered scale), so 100% shows the file 1:1.
     scale: usize,
+    out: (usize, usize),
+    /// Exact encoded output size; None while a fast proxy render is shown.
+    size: Option<u64>,
 }
 
 struct App {
@@ -382,6 +385,15 @@ impl App {
                     );
                     pv.tex.set(img, TextureOptions::NEAREST);
                     pv.palette = self.palette;
+                    let full = pipeline::Rendered {
+                        grid_w: pv.grid.0,
+                        grid_h: pv.grid.1,
+                        levels: pv.levels.clone(),
+                        scale: pv.scale,
+                        out_w: pv.out.0,
+                        out_h: pv.out.1,
+                    };
+                    pv.size = Some(io::encoded_size(self.format, &full, &self.palette));
                     ctx.request_repaint();
                 }
             }
@@ -394,12 +406,16 @@ impl App {
                 egui::ColorImage::from_rgb([r.grid_w, r.grid_h], &rgb),
                 TextureOptions::NEAREST,
             );
+            let out = (r.out_w, r.out_h);
+            let size = (!use_proxy).then(|| io::encoded_size(self.format, &r, &self.palette));
             self.preview = Some(Preview {
                 tex,
                 grid: (r.grid_w, r.grid_h),
                 levels: r.levels,
                 palette: self.palette,
                 scale: r.scale,
+                out,
+                size,
             });
             self.last_key = Some(key);
             ctx.request_repaint();
@@ -535,12 +551,12 @@ impl App {
         // ---- frame
         ui.strong("Frame");
         egui::ComboBox::from_id_salt("frame")
-            .selected_text(self.frame().map(|f| f.name.clone()).unwrap_or_else(|| "None".to_string()))
+            .selected_text(self.frame().map(|f| pretty_frame_name(&f.name)).unwrap_or_else(|| "None".to_string()))
             .width(220.0)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.frame_idx, None, "None");
                 for i in 0..self.frames.len() {
-                    let name = self.frames[i].name.clone();
+                    let name = pretty_frame_name(&self.frames[i].name);
                     ui.selectable_value(&mut self.frame_idx, Some(i), name);
                 }
             })
@@ -913,8 +929,12 @@ impl App {
 
         // ---- live preview
         ui.separator();
+        let pv_bytes = self.preview.as_ref().and_then(|pv| pv.size);
         ui.horizontal(|ui| {
             ui.weak("Preview");
+            if let Some(b) = pv_bytes {
+                ui.weak(format!("· {}", human_size(b)));
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .selectable_label(self.preview_zoom.is_none(), "Fit")
@@ -940,7 +960,7 @@ impl App {
         })
         .response
         .on_hover_text(
-            "Zoom the preview: wheel zooms at the pointer, drag pans, double-click returns to Fit. Zoom and pan survive re-renders, so you can compare pixel sizes on the same spot.",
+            "Zoom the preview: wheel zooms at the pointer, drag pans, double-click returns to Fit. Zoom and pan survive re-renders, so you can compare pixel sizes on the same spot. The header shows the exact size the output file will have.",
         );
         let pv_size = ui.available_size();
         let (pv_rect, pv_resp) = ui.allocate_exact_size(pv_size, Sense::click_and_drag());
@@ -1018,6 +1038,38 @@ fn cursor_for(h: Handle, dragging: bool) -> egui::CursorIcon {
 
 fn file_name(path: &str) -> String {
     Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string()
+}
+
+/// Compact file-size label for the preview header.
+fn human_size(n: u64) -> String {
+    if n >= 1 << 20 {
+        format!("{:.1} MiB", n as f64 / (1 << 20) as f64)
+    } else if n >= 1 << 10 {
+        format!("{:.1} KiB", n as f64 / (1 << 10) as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// Display name for a frame: "film_roll (built-in)" -> "Film Roll (built-in)".
+fn pretty_frame_name(raw: &str) -> String {
+    let (id, suffix) = match raw.find(" (") {
+        Some(i) => (&raw[..i], &raw[i..]),
+        None => (raw, ""),
+    };
+    let pretty = id
+        .split(|c: char| c == '_' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut cs = w.chars();
+            match cs.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + cs.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{pretty}{suffix}")
 }
 
 impl eframe::App for App {

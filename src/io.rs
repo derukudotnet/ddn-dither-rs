@@ -7,6 +7,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use ddn_dither::frame::Frame;
+#[cfg(feature = "gui")]
+use ddn_dither::cli::Format;
 use ddn_dither::gray::RgbImage;
 use ddn_dither::pack::pack_2bit;
 use ddn_dither::palette::Palette;
@@ -111,4 +113,41 @@ pub fn save(path: &str, r: &Rendered, pal: &Palette) -> Result<(), String> {
         writer.write_image_data(&packed).map_err(|e| format!("cannot write {path}: {e}"))?;
         writer.finish().map_err(|e| format!("cannot write {path}: {e}"))
     }
+}
+
+/// Exact byte length the rendered image would have when saved in `fmt`, without touching the disk.
+/// Uses the identical encoders/settings as `save`, so the number matches the real file.
+#[cfg(feature = "gui")]
+pub fn encoded_size(fmt: Format, r: &Rendered, pal: &Palette) -> u64 {
+    let mut buf = Vec::new();
+    match fmt {
+        Format::Webp => {
+            let rgb = r.rgb(pal);
+            if image::codecs::webp::WebPEncoder::new_lossless(&mut buf)
+                .encode(&rgb, r.out_w as u32, r.out_h as u32, image::ExtendedColorType::Rgb8)
+                .is_err()
+            {
+                return 0;
+            }
+        }
+        Format::Png => {
+            let levels = r.levels_upscaled();
+            let packed = pack_2bit(&levels, r.out_w, r.out_h);
+            let palette: Vec<u8> = pal.iter().flatten().copied().collect();
+            let mut enc = png::Encoder::new(&mut buf, r.out_w as u32, r.out_h as u32);
+            enc.set_color(png::ColorType::Indexed);
+            enc.set_depth(png::BitDepth::Two);
+            enc.set_palette(palette);
+            enc.set_compression(png::Compression::Best);
+            match enc.write_header() {
+                Ok(mut writer) => {
+                    if writer.write_image_data(&packed).is_ok() {
+                        let _ = writer.finish();
+                    }
+                }
+                Err(_) => return 0,
+            }
+        }
+    }
+    buf.len() as u64
 }
