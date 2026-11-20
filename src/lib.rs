@@ -14,6 +14,7 @@ pub mod cropbox;
 pub mod dither;
 pub mod frame;
 pub mod gray;
+pub mod mask;
 pub mod pack;
 pub mod palette;
 pub mod pipeline;
