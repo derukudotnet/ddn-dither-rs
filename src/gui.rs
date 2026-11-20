@@ -131,9 +131,10 @@ struct App {
     frame_scale: usize,
 
     pal_idx: usize,
-    custom_pal_text: String,
+    custom_pal: [String; 4],
     palette: Palette,
     pal_error: Option<String>,
+    pal_drag: Option<usize>,
 
     preview: Option<Preview>,
     last_key: Option<RenderKey>,
@@ -201,13 +202,13 @@ impl App {
         }
 
         // Palette from --palette (name, or custom hex list).
-        let (pal_idx, custom_text, palette) = match palette::by_name(&cli.palette) {
-            Some(p) => (palette::names().iter().position(|n| *n == cli.palette.to_ascii_lowercase()).unwrap_or(0), String::new(), p),
-            None => (
-                palette::BUILTIN.len(),
-                cli.palette.clone(),
-                palette::resolve(&cli.palette).unwrap_or(palette::BUILTIN[0].1),
+        let (pal_idx, custom_pal, palette) = match palette::by_name(&cli.palette) {
+            Some(p) => (
+                palette::names().iter().position(|n| *n == cli.palette.to_ascii_lowercase()).unwrap_or(0),
+                [(); 4].map(|()| String::new()),
+                p,
             ),
+            None => (palette::BUILTIN.len(), split_palette_spec(&cli.palette), palette::resolve(&cli.palette).unwrap_or(palette::BUILTIN[0].1)),
         };
 
         let mut app = App {
@@ -231,9 +232,10 @@ impl App {
             frame_idx,
             frame_scale: cli.scale,
             pal_idx,
-            custom_pal_text: custom_text,
+            custom_pal,
             palette,
             pal_error: None,
+            pal_drag: None,
             preview: None,
             last_key: None,
             preview_zoom: None,
@@ -486,11 +488,11 @@ impl App {
         };
         if let Some(pi) = palette::by_name(&self.cli.palette) {
             self.pal_idx = palette::names().iter().position(|n| *n == self.cli.palette.to_ascii_lowercase()).unwrap_or(0);
-            self.custom_pal_text = String::new();
+            self.custom_pal = [(); 4].map(|()| String::new());
             self.palette = pi;
         } else {
             self.pal_idx = palette::BUILTIN.len();
-            self.custom_pal_text = self.cli.palette.clone();
+            self.custom_pal = split_palette_spec(&self.cli.palette);
             self.palette = palette::resolve(&self.cli.palette).unwrap_or(palette::BUILTIN[0].1);
         }
         self.pal_error = None;
@@ -780,29 +782,110 @@ impl App {
         egui::ComboBox::from_id_salt("palette")
             .selected_text(if self.pal_idx < custom_idx { names[self.pal_idx].to_string() } else { "custom".to_string() })
             .show_ui(ui, |ui| {
+                ui.set_min_width(210.0);
                 for (i, n) in names.iter().enumerate() {
-                    ui.selectable_value(&mut self.pal_idx, i, *n);
+                    ui.horizontal(|ui| {
+                        swatch_strip(ui, &palette::BUILTIN[i].1);
+                        ui.selectable_value(&mut self.pal_idx, i, *n);
+                    });
                 }
-                ui.selectable_value(&mut self.pal_idx, custom_idx, "custom");
+                ui.horizontal(|ui| {
+                    swatch_strip(ui, &self.palette);
+                    ui.selectable_value(&mut self.pal_idx, custom_idx, "custom");
+                });
             })
             .response
             .on_hover_text("Recolour any time — changing the palette never re-dithers.");
         if self.pal_idx < custom_idx {
             self.palette = palette::BUILTIN[self.pal_idx].1;
             self.pal_error = None;
-            if before_pal != self.pal_idx {
-                self.custom_pal_text = palette::BUILTIN[self.pal_idx]
-                    .1
-                    .iter()
-                    .map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]))
-                    .collect::<Vec<_>>()
-                    .join(",");
-            }
+            self.custom_pal = palette::BUILTIN[self.pal_idx]
+                .1
+                .iter()
+                .map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]))
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap_or_default();
         } else {
             ui.label("Four hex colours, darkest first:")
-                .on_hover_text("3-digit shorthand like #0f0 works.");
-            if ui.text_edit_singleline(&mut self.custom_pal_text).changed() || before_pal != self.pal_idx {
-                match palette::resolve(&self.custom_pal_text) {
+                .on_hover_text("One box per colour, darkest first; clicking a box selects everything in it, so you can paste straight over the old value. Drag the grip in front of a box to reorder. 3-digit shorthand like #0f0 works.");
+            let mut edited = before_pal != self.pal_idx;
+            let mut slots: Vec<Rect> = Vec::new();
+            ui.horizontal(|ui| {
+                let gap = ui.spacing().item_spacing.x;
+                let box_w = ((ui.available_width() - 7.0 * gap - 36.0) / 4.0).max(40.0);
+                for (i, text) in self.custom_pal.iter_mut().enumerate() {
+                    let (grip, gresp) = ui.allocate_exact_size(vec2(9.0, 16.0), Sense::click_and_drag());
+                    let gcol = if self.pal_drag == Some(i) { Color32::from_gray(160) } else { Color32::from_gray(100) };
+                    let gstroke = Stroke::new(1.2_f32, gcol);
+                    let gc = grip.center();
+                    for dy in [-3.0_f32, 0.0, 3.0] {
+                        ui.painter().line_segment([pos2(gc.x, gc.y + dy - 1.0), pos2(gc.x, gc.y + dy + 1.0)], gstroke);
+                    }
+                    if gresp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                    }
+                    if self.pal_drag == Some(i) {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    }
+                    if gresp.drag_started() {
+                        self.pal_drag = Some(i);
+                    }
+                    let fill = palette::parse_hex(text).ok();
+                    let c = match fill {
+                        Some(c) => Color32::from_rgb(c[0], c[1], c[2]),
+                        None => Color32::from_gray(35),
+                    };
+                    let lum = |c: &palette::Rgb| 0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32;
+                    let ink = if fill.map(|c| lum(&c) < 100.0).unwrap_or(true) { Color32::WHITE } else { Color32::BLACK };
+                    let stroke = if fill.is_some() { Stroke::NONE } else { Stroke::new(1.0_f32, Color32::from_rgb(200, 60, 60)) };
+                    let id = egui::Id::new(("pal_box", i));
+                    let frame = egui::Frame::none()
+                        .fill(c)
+                        .stroke(stroke)
+                        .rounding(3.0)
+                        .inner_margin(egui::Margin::symmetric(3.0, 2.0))
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(text)
+                                    .id(id)
+                                    .desired_width(box_w - 8.0)
+                                    .margin(egui::Margin::symmetric(0.0, 2.0))
+                                    .font(egui::TextStyle::Monospace)
+                                    .frame(false)
+                                    .text_color(ink),
+                            )
+                        });
+                    edited |= frame.inner.changed() || frame.inner.lost_focus();
+                    if frame.inner.gained_focus() {
+                        if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
+                            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(0),
+                                egui::text::CCursor::new(text.chars().count()),
+                            )));
+                            egui::TextEdit::store_state(ui.ctx(), id, st);
+                        }
+                    }
+                    slots.push(Rect::from_min_max(grip.min, frame.response.rect.max));
+                }
+            });
+            if let Some(src) = self.pal_drag {
+                let px = ui.ctx().input(|i| i.pointer.interact_pos());
+                if let Some(px) = px {
+                    if let Some(t) = slots.iter().position(|r| r.contains(px)) {
+                        if t != src {
+                            self.custom_pal.swap(src, t);
+                            self.pal_drag = Some(t);
+                            edited = true;
+                        }
+                    }
+                }
+                if !ui.ctx().input(|i| i.pointer.any_down()) {
+                    self.pal_drag = None;
+                }
+            }
+            if edited {
+                match palette::resolve(&self.custom_pal.join(",")) {
                     Ok(p) => {
                         self.palette = p;
                         self.pal_error = None;
@@ -814,12 +897,6 @@ impl App {
                 ui.colored_label(Color32::from_rgb(200, 60, 60), e);
             }
         }
-        ui.horizontal(|ui| {
-            for c in self.palette {
-                let (rect, _) = ui.allocate_exact_size(vec2(36.0, 18.0), Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(c[0], c[1], c[2]));
-            }
-        });
         ui.separator();
 
         // ---- output
@@ -1129,6 +1206,20 @@ fn file_name(path: &str) -> String {
 }
 
 /// Compact file-size label for the preview header.
+fn swatch_strip(ui: &mut egui::Ui, pal: &Palette) {
+    for c in pal {
+        let (rect, _) = ui.allocate_exact_size(vec2(9.0, 12.0), Sense::hover());
+        ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(c[0], c[1], c[2]));
+    }
+}
+
+fn split_palette_spec(spec: &str) -> [String; 4] {
+    let mut parts: Vec<String> = spec.split(',').map(|s| s.trim().to_string()).collect();
+    parts.truncate(4);
+    parts.resize(4, String::new());
+    parts.try_into().unwrap_or_default()
+}
+
 fn human_size(n: u64) -> String {
     if n >= 1 << 20 {
         format!("{:.1} MiB", n as f64 / (1 << 20) as f64)

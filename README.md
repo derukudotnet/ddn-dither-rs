@@ -73,7 +73,7 @@ ddn-dither                                # window, drop an image onto it
   whole picture in and fills the rest with the darkest tone, **Edge pad** fills the rest by
   repeating the picture's outermost rows and columns (a smeared-out extension of the image
   border; sometimes it hides dithering seams better than dark padding).
-* Palette: ddn, green, bw, pocket, color, or your own four hex colours (darkest first; 3-digit shorthand like `#0f0` works).
+* Palette: ddn (default), green, bgb, pocket, bw, demichrome, icecream, kirokaze, color, or your own four hex colours (darkest first; 3-digit shorthand like `#0f0` works). The palette dropdown shows a mini swatch strip for each entry, the custom editor is one colour-filled text box per colour (boxes can be reordered by dragging their grip), and picking a built-in palette fills the boxes so you can fine-tune from there.
 * Switching palette or recolouring happens instantly — the dithered grid is cached and only recoloured.
 * Every control has a tooltip; hover (or long-press) it for details.
 * Drag & drop from a file manager works on X11 and on Windows/macOS. On native Wayland the
