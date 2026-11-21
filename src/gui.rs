@@ -4,6 +4,7 @@
 //! All geometry and image processing lives in the `ddn_dither` library and is unit-tested
 //! there; this file only wires it to egui widgets.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use eframe::egui::{self, pos2, vec2, Color32, Rect, Sense, Stroke, TextureHandle, TextureOptions};
@@ -12,6 +13,7 @@ use ddn_dither::cli::{self, Cli, CropMode, Format, FrameSel};
 use ddn_dither::cropbox::{CropBox, Handle};
 use ddn_dither::frame::Frame;
 use ddn_dither::gray::Plane;
+use ddn_dither::mask;
 use ddn_dither::palette::{self, Palette};
 use ddn_dither::pipeline::{self, Fit, Params, Rendered};
 use ddn_dither::resample::{resize_plane, resize_rgb, BoxF};
@@ -22,6 +24,28 @@ use crate::io;
 const PROXY_MAX: usize = 1200;
 /// Longest side of the texture used to show the source photo.
 const DISPLAY_MAX: usize = 2048;
+/// Brush gamma that fresh paint starts with (brightens, the common touch-up case).
+const BRUSH_GAMMA_DEFAULT: f64 = 0.5;
+
+/// Re-snapshot the mask after this many committed steps, to bound how far replays reach.
+const CHECKPOINT_EVERY: usize = 10;
+/// Brush softness on load, as a percentage of the radius spent feathering.
+const BRUSH_SOFT_DEFAULT: f64 = 50.0;
+/// Slider range shared by the global and the brush gamma (log-symmetrical around 1.00).
+const GAMMA_MIN: f64 = 0.5;
+const GAMMA_MAX: f64 = 2.0;
+/// Longest side of the tint texture used to show painted areas.
+const MASK_TINT_MAX: usize = 512;
+
+/// What the pointer does over the source photo.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tool {
+    Crop,
+    Paint,
+    Erase,
+    /// Clicked vertices; the shape closes on clicking the first point again or pressing Enter.
+    Polygon,
+}
 
 /// Overlay lines drawn on top of the crop box to help alignment.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,6 +113,8 @@ struct RenderKey {
     autocontrast: bool,
     gamma: f64,
     fit: usize,
+    mask_gamma: f64,
+    mask_version: u64,
     proxy: bool,
     source_id: u64,
 }
@@ -122,11 +148,38 @@ struct App {
     fit_mode: usize,
     autocontrast: bool,
     gamma: f64,
-    /// Leftover wheel points on the gamma slider, spent in 0.05 steps once a full line is reached.
-    gamma_wheel_acc: f32,
+    /// Leftover wheel points per slider (by widget id), spent in whole steps once a full line is reached.
+    wheel_acc: HashMap<egui::Id, f64>,
     snap_pixels: bool,
     guides: Guides,
     format: Format,
+
+    tool: Tool,
+    /// Brush radius in source pixels; wheel over the photo changes it.
+    brush_r: f64,
+    /// Feathering of the dab rim as a percentage of the radius (0 = hard circle).
+    brush_soft: f64,
+    /// Painted coverage at source resolution; `None` until the first dab.
+    mask: Option<Plane>,
+    /// Bumped on every mutation of `mask` so the preview re-renders.
+    mask_version: u64,
+    /// Proxy-resolution copy of the mask, kept for fast renders while dragging/stroking.
+    mask_view: Option<(Plane, u64)>,
+    mask_gamma: f64,
+    /// Translucent tint texture showing painted areas, rebuilt when not stroking.
+    mask_tex: Option<(TextureHandle, u64)>,
+    /// Last dabbed position of the current stroke, for interpolating fast pointer moves.
+    stroke: Option<(f64, f64)>,
+    /// Vertices of the polygon being drawn with the Polygon tool, in source coordinates.
+    poly: Vec<(f64, f64)>,
+    /// Committed touch-up steps; replaying them rebuilds the mask (also for undo/redo).
+    mask_steps: Vec<mask::Step>,
+    /// Steps undone since the last new stroke, replayed on redo.
+    mask_redo: Vec<mask::Step>,
+    /// The stroke currently being drawn, committed as one step when the pointer is released.
+    mask_open: Option<mask::Step>,
+    /// Mask snapshot at a known step count, so replays start somewhere recent.
+    mask_ckpt: Option<(usize, Plane)>,
 
     frames: Vec<Frame>,
     frame_idx: Option<usize>,
@@ -241,9 +294,23 @@ impl App {
             fit_mode: fit_mode_of(cli.crop_mode),
             autocontrast: cli.autocontrast,
             gamma: cli.gamma,
-            gamma_wheel_acc: 0.0,
+            wheel_acc: HashMap::new(),
             snap_pixels: false,
             guides: Guides::Thirds,
+            tool: Tool::Crop,
+            brush_r: 24.0,
+            brush_soft: BRUSH_SOFT_DEFAULT,
+            mask: None,
+            mask_version: 0,
+            mask_view: None,
+            mask_gamma: BRUSH_GAMMA_DEFAULT,
+            mask_tex: None,
+            stroke: None,
+            poly: Vec::new(),
+            mask_steps: Vec::new(),
+            mask_redo: Vec::new(),
+            mask_open: None,
+            mask_ckpt: None,
             format: cli.format,
             frames,
             frame_idx,
@@ -335,6 +402,17 @@ impl App {
         self.crop = CropBox::max_fit(w as f64, h as f64, self.aspect());
         self.last_aspect = self.aspect();
         self.drag = None;
+        self.stroke = None;
+        self.poly.clear();
+        self.mask = None;
+        self.mask_version += 1;
+        self.mask_view = None;
+        self.mask_tex = None;
+        self.mask_steps.clear();
+        self.mask_redo.clear();
+        self.mask_open = None;
+        self.mask_ckpt = None;
+        self.brush_r = (w.min(h) as f64 / 12.0).max(4.0);
         self.last_key = None;
         self.status = format!("Loaded {path} ({w}x{h})");
     }
@@ -350,7 +428,7 @@ impl App {
         }
     }
 
-    fn params<'a>(&'a self, crop: BoxF) -> Params<'a> {
+    fn params<'a>(&'a self, crop: BoxF, mask: Option<&'a Plane>) -> Params<'a> {
         Params {
             fit: match self.fit_mode {
                 1 => Fit::Contain,
@@ -364,7 +442,207 @@ impl App {
             frame_scale: self.frame_scale,
             autocontrast: self.autocontrast,
             gamma: self.gamma,
+            mask,
+            mask_gamma: self.mask_gamma,
         }
+    }
+
+    /// Paint or erase one brush dab in source coordinates.
+    fn dab_at(&mut self, x: f64, y: f64) {
+        let Some(src) = self.source.as_ref() else { return };
+        if !matches!(self.tool, Tool::Paint | Tool::Erase) {
+            return;
+        }
+        let (w, h) = (src.w, src.h);
+        let (erase, r, soft) = match &mut self.mask_open {
+            Some(mask::Step::Brush { erase, radius, soft, pts }) => {
+                pts.push((x, y));
+                (*erase, *radius, *soft)
+            }
+            _ => (self.tool == Tool::Erase, self.brush_r, (self.brush_soft / 100.0).clamp(0.0, 0.95)),
+        };
+        let m = self.mask.get_or_insert_with(|| Plane::new(w, h, vec![0; w * h]));
+        if erase {
+            mask::erase(m, x, y, r, soft);
+        } else {
+            mask::dab(m, x, y, r, soft);
+        }
+        self.mask_version += 1;
+    }
+
+    /// Fill the drawn polygon into the mask (erasing when the Erase tool is active).
+    fn close_polygon(&mut self) {
+        let pts = std::mem::take(&mut self.poly);
+        if pts.len() < 3 {
+            return;
+        }
+        let (w, h) = match &self.source {
+            Some(s) => (s.w, s.h),
+            None => return,
+        };
+        let feather = self.brush_r * self.brush_soft / 100.0;
+        let erase = self.tool == Tool::Erase;
+        let m = self.mask.get_or_insert_with(|| Plane::new(w, h, vec![0; w * h]));
+        mask::fill_polygon(m, &pts, feather, erase);
+        self.mask_version += 1;
+        self.mask_redo.clear();
+        self.mask_steps.push(mask::Step::Polygon { erase, feather, pts });
+        self.take_checkpoint();
+    }
+
+    /// Begin an undoable brush stroke with the current tool and brush settings.
+    fn open_stroke(&mut self) {
+        self.mask_open = Some(mask::Step::Brush {
+            erase: self.tool == Tool::Erase,
+            radius: self.brush_r,
+            soft: (self.brush_soft / 100.0).clamp(0.0, 0.95),
+            pts: Vec::new(),
+        });
+    }
+
+    /// Close the brush stroke and remember it as one undo step.
+    fn commit_step(&mut self) {
+        let Some(step) = self.mask_open.take() else { return };
+        if let mask::Step::Brush { pts, .. } = &step {
+            if pts.is_empty() {
+                return;
+            }
+        }
+        self.mask_redo.clear();
+        self.mask_steps.push(step);
+        self.take_checkpoint();
+    }
+
+    /// Snapshot the mask every few committed steps, bounding how far replays reach.
+    fn take_checkpoint(&mut self) {
+        let n = self.mask_steps.len();
+        let behind = match &self.mask_ckpt {
+            Some((c, _)) => n - c,
+            None => n,
+        };
+        if behind >= CHECKPOINT_EVERY {
+            if let Some(m) = &self.mask {
+                self.mask_ckpt = Some((n, m.clone()));
+            }
+        }
+    }
+
+    /// Rebuild the mask from the remaining steps, then invalidate the preview.
+    fn rebuild_mask(&mut self) {
+        if self.mask_ckpt.as_ref().is_some_and(|(n, _)| *n > self.mask_steps.len()) {
+            self.mask_ckpt = None;
+        }
+        let (w, h) = match self.source.as_ref() {
+            Some(s) => (s.w, s.h),
+            None => return,
+        };
+        let ckpt = self.mask_ckpt.as_ref().map(|(n, p)| (*n, p));
+        self.mask = mask::replay(&self.mask_steps, w, h, ckpt);
+        self.mask_version += 1;
+    }
+
+    /// Undo the last committed touch-up step.
+    fn undo_mask(&mut self) {
+        if self.stroke.is_some() || self.mask_open.is_some() {
+            return;
+        }
+        if let Some(step) = self.mask_steps.pop() {
+            self.mask_redo.push(step);
+            self.rebuild_mask();
+        }
+    }
+
+    /// Redo the most recently undone touch-up step.
+    fn redo_mask(&mut self) {
+        if self.stroke.is_some() || self.mask_open.is_some() {
+            return;
+        }
+        if let Some(step) = self.mask_redo.pop() {
+            self.mask_steps.push(step);
+            self.rebuild_mask();
+            self.take_checkpoint();
+        }
+    }
+
+    /// Feed one pointer position (source pixels) to the active Paint/Erase stroke.
+    fn feed_stroke(&mut self, x: f64, y: f64, new_stroke: bool) {
+        if new_stroke {
+            self.open_stroke();
+            self.stroke = Some((x, y));
+            self.dab_at(x, y);
+            return;
+        }
+        if let Some((lx, ly)) = self.stroke {
+            let step = (self.brush_r / 4.0).max(1.0);
+            let dist = (x - lx).hypot(y - ly);
+            if dist > 0.0 {
+                let n = ((dist / step).floor() as usize).max(1);
+                for k in 1..=n {
+                    let t = k as f64 / n as f64;
+                    self.dab_at(lx + (x - lx) * t, ly + (y - ly) * t);
+                }
+            }
+        }
+        self.stroke = Some((x, y));
+    }
+
+    /// Finish the active stroke and commit it as one undo step.
+    fn end_stroke(&mut self) {
+        self.stroke = None;
+        self.commit_step();
+    }
+
+    /// Place a polygon vertex, or close the shape when clicking near the first one.
+    fn place_poly_vertex(&mut self, x: f64, y: f64, snap: f64) {
+        let near = self.poly.len() >= 3 && self.poly.first().is_some_and(|(fx, fy)| (x - fx).hypot(y - fy) <= snap);
+        if near {
+            self.close_polygon();
+        } else {
+            self.poly.push((x, y));
+        }
+    }
+
+    /// Keep the proxy-resolution mask copy in step while fast (drag/stroke) renders run.
+    fn sync_mask_view(&mut self, use_proxy: bool) {
+        if !use_proxy {
+            return;
+        }
+        let (pw, ph) = match self.source.as_ref().and_then(|s| s.proxy.as_ref()) {
+            Some((plane, _, _)) => (plane.w, plane.h),
+            None => return,
+        };
+        match &self.mask {
+            Some(m) => {
+                if self.mask_view.as_ref().map(|(_, v)| *v) != Some(self.mask_version) {
+                    self.mask_view = Some((decimate_plane(m, pw, ph), self.mask_version));
+                }
+            }
+            None => self.mask_view = None,
+        }
+    }
+
+    /// Rebuild the painted-area tint; skipped while a stroke is in progress so painting stays cheap.
+    fn sync_mask_tex(&mut self, ctx: &egui::Context) {
+        let Some(m) = &self.mask else {
+            self.mask_tex = None;
+            return;
+        };
+        if self.mask_tex.as_ref().map(|(_, v)| *v) == Some(self.mask_version) {
+            return;
+        }
+        let s = MASK_TINT_MAX.min(m.w.max(m.h)) as f64 / m.w.max(m.h) as f64;
+        let (dw, dh) = (((m.w as f64 * s).round() as usize).max(1), ((m.h as f64 * s).round() as usize).max(1));
+        let small = decimate_plane(m, dw, dh);
+        let mut rgba = Vec::with_capacity(dw * dh * 4);
+        for &c in &small.data {
+            rgba.extend_from_slice(&[255, 214, 120, (c as f32 * 0.45) as u8]);
+        }
+        let tex = ctx.load_texture(
+            "touchup",
+            egui::ColorImage::from_rgba_unmultiplied([dw, dh], &rgba),
+            TextureOptions::LINEAR,
+        );
+        self.mask_tex = Some((tex, self.mask_version));
     }
 
     /// Render from the proxy (fast, while dragging) or the full-resolution photo.
@@ -374,9 +652,10 @@ impl App {
         match (&src.proxy, use_proxy) {
             (Some((plane, sx, sy)), true) => {
                 let pb = BoxF { x0: b.x0 * sx, y0: b.y0 * sy, x1: b.x1 * sx, y1: b.y1 * sy };
-                Some(pipeline::render(plane, &self.params(pb)))
+                let mask = self.mask_view.as_ref().map(|(m, _)| m);
+                Some(pipeline::render(plane, &self.params(pb, mask)))
             }
-            _ => Some(pipeline::render(&src.gray, &self.params(b))),
+            _ => Some(pipeline::render(&src.gray, &self.params(b, self.mask.as_ref()))),
         }
     }
 
@@ -389,6 +668,8 @@ impl App {
             scale: self.frame_scale,
             autocontrast: self.autocontrast,
             gamma: self.gamma,
+            mask_gamma: self.mask_gamma,
+            mask_version: self.mask_version,
             fit: self.fit_mode,
             proxy: use_proxy,
             source_id: self.source_id,
@@ -399,7 +680,8 @@ impl App {
         if self.source.is_none() {
             return;
         }
-        let use_proxy = self.drag.is_some();
+        let use_proxy = self.drag.is_some() || self.stroke.is_some();
+        self.sync_mask_view(use_proxy);
         let key = self.render_key(use_proxy);
         if self.last_key.as_ref() == Some(&key) {
             if let Some(pv) = &mut self.preview {
@@ -456,7 +738,7 @@ impl App {
 
     fn save_to(&mut self, path: &str) -> bool {
         let Some(src) = self.source.as_ref() else { return false };
-        let r = pipeline::render(&src.gray, &self.params(self.crop.to_box()));
+        let r = pipeline::render(&src.gray, &self.params(self.crop.to_box(), self.mask.as_ref()));
         match io::save(path, &r, &self.palette) {
             Ok(()) => {
                 self.status = format!("Saved {path} ({}x{})", r.out_w, r.out_h);
@@ -521,6 +803,17 @@ impl App {
         self.frame_scale = self.cli.scale;
         self.format = self.cli.format;
         self.guides = Guides::Thirds;
+        self.tool = Tool::Crop;
+        self.mask_gamma = BRUSH_GAMMA_DEFAULT;
+        self.brush_soft = BRUSH_SOFT_DEFAULT;
+        self.stroke = None;
+        self.mask_steps.clear();
+        self.mask_redo.clear();
+        self.mask_open = None;
+        self.mask_ckpt = None;
+        if self.mask.take().is_some() {
+            self.mask_version += 1;
+        }
         if let Some(src) = &self.source {
             let (ow, oh) = cli::resolve_size(&self.cli, src.w, src.h);
             self.out_w = ow;
@@ -680,11 +973,11 @@ impl App {
             if !hole_is_rect {
                 ui.add(egui::Label::new(egui::RichText::new("Window is not a plain rectangle; the photo fills its bounding box.").color(Color32::from_rgb(200, 140, 0))).truncate());
             }
-            ui.add(
-                egui::Slider::new(&mut self.frame_scale, 1..=16)
+            wheel_slider(ui, &mut self.wheel_acc, &mut self.frame_scale, |v| {
+                egui::Slider::new(v, 1..=16)
                     .custom_formatter(|n, _| format!("×{n:.0}"))
-                    .text("Scale"),
-            )
+                    .text("Scale")
+            }, 1.0, 16.0, 1.0)
             .on_hover_text("Integer upscale of the framed image. ×4 makes 640×576 for the built-in frame.");
             let s = self.frame_scale.max(1);
             ui.add(egui::Label::new(format!("Window {hole_w}×{hole_h} px → output {}×{} (×{s})", fw * s, fh * s)).truncate());
@@ -766,13 +1059,13 @@ impl App {
             } else {
                 ui.horizontal(|ui| {
                     ui.label("Pixel size");
-                    ui.add(
-                        egui::Slider::new(&mut self.pixel_size, 0..=32)
+                    wheel_slider(ui, &mut self.wheel_acc, &mut self.pixel_size, |v| {
+                        egui::Slider::new(v, 0..=32)
                             .custom_formatter(|n, _| if n == 0.0 { "auto".to_string() } else { format!("{n:.0}") })
                             .custom_parser(|s| {
                                 if s.trim().eq_ignore_ascii_case("auto") { Some(0.0) } else { s.trim().parse::<f64>().ok() }
-                            }),
-                    );
+                            })
+                    }, 0.0, 32.0, 1.0);
                     let ps = if self.pixel_size == 0 { pipeline::auto_pixel_size(self.out_w) } else { self.pixel_size.max(1) };
                     if self.pixel_size == 0 {
                         ui.weak(format!("→ {ps}"));
@@ -851,34 +1144,112 @@ impl App {
         });
         ui.separator();
 
+        // ---- touch-up
+        ui.strong("Touch-up");
+        ui.horizontal(|ui| {
+            let toggle = |ui: &mut egui::Ui, label: &str, on: bool| {
+                if on {
+                    ui.add(egui::Button::new(label).fill(ui.visuals().selection.bg_fill))
+                } else {
+                    ui.add(egui::Button::new(label))
+                }
+            };
+            for (label, tool) in [
+                ("Crop", Tool::Crop),
+                ("Paint", Tool::Paint),
+                ("Erase", Tool::Erase),
+                ("Poly", Tool::Polygon),
+            ] {
+                if toggle(ui, label, self.tool == tool)
+                    .on_hover_text(match tool {
+                        Tool::Crop => "Back to moving and resizing the selection rectangle.",
+                        Tool::Paint => "Paint areas that the Gamma slider below brightens or darkens - for lifting detail out of dark shadows. Mouse wheel over the picture or the preview changes the brush size; you can paint in both windows.",
+                        Tool::Erase => "Remove painted areas; the brush size follows the mouse wheel over the picture, too.",
+                        Tool::Polygon => "Fill a polygon region: click the corners, click the first corner again (it highlights) or press Enter to close the shape, right-click removes the last corner. Edges feather outward by Softness of the brush radius. Works in the source and the preview window alike. With the Erase tool active, a polygon erases its region instead.",
+                    })
+                    .clicked()
+                {
+                    self.tool = tool;
+                    self.poly.clear();
+                }
+            }
+            if ui
+                .add_enabled(!self.mask_steps.is_empty(), egui::Button::new("Undo"))
+                .on_hover_text("Undo the last touch-up action (Ctrl+Z).")
+                .clicked()
+            {
+                self.undo_mask();
+            }
+            if ui
+                .add_enabled(!self.mask_redo.is_empty(), egui::Button::new("Redo"))
+                .on_hover_text("Redo the last undone touch-up action (Ctrl+Y or Ctrl+Shift+Z).")
+                .clicked()
+            {
+                self.redo_mask();
+            }
+            if ui
+                .add_enabled(self.mask.is_some(), egui::Button::new("Clear"))
+                .on_hover_text("Remove all painted and filled areas (Ctrl+Z brings them back).")
+                .clicked()
+            {
+                self.mask = None;
+                self.mask_version += 1;
+                self.poly.clear();
+                self.mask_redo.clear();
+                self.mask_steps.push(mask::Step::Clear);
+            }
+        });
+        if self.tool != Tool::Crop {
+            ui.horizontal(|ui| {
+                ui.label("Gamma");
+                wheel_slider(ui, &mut self.wheel_acc, &mut self.mask_gamma, |v| {
+                    egui::Slider::new(v, GAMMA_MIN..=GAMMA_MAX)
+                        .step_by(0.05)
+                        .custom_formatter(|n, _| format!("{n:.2}"))
+                        .custom_parser(|s| s.trim().parse::<f64>().ok())
+                }, GAMMA_MIN, GAMMA_MAX, 0.05);
+                if ui.small_button("Reset").on_hover_text("Back to the starting strength").clicked() {
+                    self.mask_gamma = BRUSH_GAMMA_DEFAULT;
+                }
+            })
+            .response
+            .on_hover_text("Strength applied where you painted or filled (Polygon), before the contrast stretch. Below 1.00 brightens, above 1.00 darkens. Arrow keys, mouse wheel over the box or dragging all move in 0.05 steps.");
+        }
+        if self.tool != Tool::Crop {
+            ui.horizontal(|ui| {
+                ui.label("Softness");
+                wheel_slider(ui, &mut self.wheel_acc, &mut self.brush_soft, |v| {
+                    egui::Slider::new(v, 0.0..=95.0)
+                        .step_by(5.0)
+                        .suffix("%")
+                }, 0.0, 95.0, 5.0);
+            })
+            .response
+            .on_hover_text("Feathering of the brush edge, as a percentage of the brush radius: 0% is a hard circle, 50% feather over the outer half, higher blends even wider so the painted area fades into the picture. Mouse wheel over the box changes it in 5% steps.");
+            ui.weak(format!(
+                "Brush {} px on a {}x{} picture - mouse wheel changes it",
+                self.brush_r.round() as i64,
+                self.source.as_ref().map(|s| s.w).unwrap_or(0),
+                self.source.as_ref().map(|s| s.h).unwrap_or(0)
+            ));
+        }
+        if self.tool == Tool::Polygon {
+            ui.weak("Click the corners; click the first corner again or press Enter to fill; right-click removes a corner. Edge glow = Softness % of the brush radius. Paint in either window; the wheel changes the brush size over both.");
+        }
+        ui.separator();
+
         // ---- contrast
         ui.strong("Contrast");
         ui.checkbox(&mut self.autocontrast, "Auto")
             .on_hover_text("Stretches the picture's histogram before dithering, like the original tool (top 10% clipped).");
         ui.horizontal(|ui| {
             ui.label("Gamma");
-            let sresp = ui.add(
-                egui::Slider::new(&mut self.gamma, 0.25..=4.0)
+            wheel_slider(ui, &mut self.wheel_acc, &mut self.gamma, |v| {
+                egui::Slider::new(v, GAMMA_MIN..=GAMMA_MAX)
                     .step_by(0.05)
                     .custom_formatter(|n, _| format!("{n:.2}"))
-                    .custom_parser(|s| s.trim().parse::<f64>().ok()),
-            );
-            if sresp.hovered() {
-                let dy = ui.input(|i| i.raw_scroll_delta.y);
-                if dy != 0.0 {
-                    self.gamma_wheel_acc += dy;
-                    let steps = (self.gamma_wheel_acc / 8.0).trunc() as f64;
-                    if steps != 0.0 {
-                        self.gamma_wheel_acc -= (steps * 8.0) as f32;
-                        self.gamma = (self.gamma + steps * 0.05).clamp(0.25, 4.0);
-                        self.gamma = (self.gamma / 0.05).round() * 0.05;
-                    }
-                    ui.input_mut(|i| {
-                        i.raw_scroll_delta = egui::Vec2::ZERO;
-                        i.smooth_scroll_delta = egui::Vec2::ZERO;
-                    });
-                }
-            }
+                    .custom_parser(|s| s.trim().parse::<f64>().ok())
+            }, GAMMA_MIN, GAMMA_MAX, 0.05);
             if ui.small_button("Reset").on_hover_text("Back to no gamma (1.00)").clicked() {
                 self.gamma = 1.0;
             }
@@ -1107,13 +1478,44 @@ impl App {
         let to_img = |p: egui::Pos2| ((p.x - img_rect.min.x) as f64 / scale, (p.y - img_rect.min.y) as f64 / scale);
         let to_screen = |x: f64, y: f64| pos2(img_rect.min.x + (x * scale) as f32, img_rect.min.y + (y * scale) as f32);
 
+        let brushing = self.tool != Tool::Crop;
+        if brushing {
+            if resp.hovered() {
+                let dz = ctx.input(|i| i.raw_scroll_delta.y);
+                if dz != 0.0 {
+                    self.brush_r = (self.brush_r * (dz as f64 / 160.0).exp()).clamp(4.0, iw.min(ih) / 2.0);
+                }
+            }
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let (px, py) = to_img(pos);
+                let (ix, iy) = (px.clamp(0.0, iw), py.clamp(0.0, ih));
+                if self.tool == Tool::Polygon {
+                    if resp.secondary_clicked() {
+                        self.poly.pop();
+                    } else if resp.clicked() {
+                        let snap = 10.0 / scale;
+                        self.place_poly_vertex(ix, iy, snap);
+                    }
+                } else {
+                    if resp.drag_started() {
+                        self.feed_stroke(ix, iy, true);
+                    } else if resp.dragged() {
+                        self.feed_stroke(ix, iy, false);
+                    }
+                    if resp.drag_stopped() {
+                        self.end_stroke();
+                    }
+                }
+            }
+        }
+
         if self.fit_mode == 0 {
             // ---- interaction
             let tol = 10.0 / scale;
             let aspect = self.aspect();
             let min_w = 24.0_f64.min(iw / 4.0);
 
-            if self.drag.is_none() {
+            if self.drag.is_none() && !brushing {
                 if let Some(pos) = resp.hover_pos() {
                     let (ix, iy) = to_img(pos);
                     if let Some(h) = self.crop.hit(ix, iy, tol) {
@@ -1125,7 +1527,7 @@ impl App {
                     }
                 }
             }
-            if resp.drag_started() {
+            if !brushing && resp.drag_started() {
                 if let Some(pos) = resp.interact_pointer_pos() {
                     let (ix, iy) = to_img(pos);
                     if let Some(h) = self.crop.hit(ix, iy, tol) {
@@ -1133,14 +1535,14 @@ impl App {
                     }
                 }
             }
-            if resp.dragged() {
+            if !brushing && resp.dragged() {
                 if let (Some(d), Some(pos)) = (self.drag.as_ref(), resp.interact_pointer_pos()) {
                     ctx.set_cursor_icon(cursor_for(d.handle, true));
                     let (ix, iy) = to_img(pos);
                     self.crop = CropBox::drag(&d.start, d.handle, d.ptr, (ix, iy), aspect, iw, ih, min_w);
                 }
             }
-            if resp.drag_stopped() {
+            if !brushing && resp.drag_stopped() {
                 self.drag = None;
             }
 
@@ -1200,6 +1602,27 @@ impl App {
                 egui::FontId::proportional(13.0),
                 Color32::WHITE,
             );
+        }
+        self.sync_mask_tex(ctx);
+        if let Some((mtex, _)) = &self.mask_tex {
+            painter.image(mtex.id(), img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        if !self.poly.is_empty() {
+            let cur = ctx
+                .input(|i| i.pointer.hover_pos())
+                .filter(|p| img_rect.contains(*p))
+                .map(|pos| {
+                    let (ix, iy) = to_img(pos);
+                    let near = self.poly.len() >= 3 && (ix - self.poly[0].0).hypot(iy - self.poly[0].1) <= 10.0 / scale;
+                    (to_screen(ix, iy), near)
+                });
+            poly_overlay(&painter, &to_screen, &self.poly, cur);
+        }
+        if brushing && self.tool != Tool::Polygon {
+            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|p| img_rect.contains(*p)) {
+                let (ix, iy) = to_img(pos);
+                painter.circle_stroke(to_screen(ix, iy), (self.brush_r * scale) as f32, Stroke::new(1.5_f32, Color32::WHITE));
+            }
         }
         if hovering {
             painter.rect_filled(area, 0.0, Color32::from_black_alpha(160));
@@ -1282,11 +1705,11 @@ impl App {
                 ((nh * s - pv_rect.height()) / 2.0).max(0.0),
             );
             let cl = |v: f32, o: f32| v.clamp(-o, o);
-            if pv_resp.dragged() {
+            if pv_resp.dragged() && self.tool == Tool::Crop {
                 let d = pv_resp.drag_delta();
                 self.pv_pan = (cl(self.pv_pan.0 + d.x, ov.0), cl(self.pv_pan.1 + d.y, ov.1));
             }
-            if pv_resp.hovered() {
+            if pv_resp.hovered() && self.tool == Tool::Crop {
                 let dz = ctx.input(|i| i.raw_scroll_delta.y);
                 if dz != 0.0 {
                     let z0 = self.preview_zoom.unwrap_or(if fit >= 1.0 { fit.floor() } else { fit });
@@ -1304,11 +1727,11 @@ impl App {
                     self.preview_zoom = Some(z);
                 }
             }
-            if pv_resp.double_clicked() {
+            if pv_resp.double_clicked() && self.tool == Tool::Crop {
                 self.preview_zoom = None;
                 self.pv_pan = (0.0, 0.0);
             }
-            if self.preview_zoom.is_some() && (pv_resp.hovered() || pv_resp.dragged()) {
+            if self.tool == Tool::Crop && self.preview_zoom.is_some() && (pv_resp.hovered() || pv_resp.dragged()) {
                 ctx.set_cursor_icon(if pv_resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
             }
             let r = Rect::from_center_size(
@@ -1317,8 +1740,148 @@ impl App {
             );
             let p = ui.painter_at(pv_rect);
             p.image(tex_id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            if self.tool != Tool::Crop {
+                if pv_resp.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                }
+                let crop = self.crop;
+                let to_pv = |sx: f64, sy: f64| {
+                    pos2(
+                        r.min.x + (((sx - crop.x) / crop.w) * r.width() as f64) as f32,
+                        r.min.y + (((sy - crop.y) / crop.h) * r.height() as f64) as f32,
+                    )
+                };
+                if pv_resp.hovered() {
+                    let dz = ctx.input(|i| i.raw_scroll_delta.y);
+                    if dz != 0.0 {
+                        self.brush_r = (self.brush_r * (dz as f64 / 160.0).exp()).clamp(4.0, iw.min(ih) / 2.0);
+                    }
+                }
+                if let Some(pos) = pv_resp.interact_pointer_pos() {
+                    let sx = crop.x + ((pos.x - r.min.x) / r.width()).clamp(0.0, 1.0) as f64 * crop.w;
+                    let sy = crop.y + ((pos.y - r.min.y) / r.height()).clamp(0.0, 1.0) as f64 * crop.h;
+                    if self.tool == Tool::Polygon {
+                        if pv_resp.secondary_clicked() {
+                            self.poly.pop();
+                        } else if pv_resp.clicked() {
+                            let snap = 10.0 * crop.w / r.width() as f64;
+                            self.place_poly_vertex(sx, sy, snap);
+                        }
+                    } else {
+                        if pv_resp.drag_started() {
+                            self.feed_stroke(sx, sy, true);
+                        } else if pv_resp.dragged() {
+                            self.feed_stroke(sx, sy, false);
+                        }
+                        if pv_resp.drag_stopped() {
+                            self.end_stroke();
+                        }
+                    }
+                }
+                if !self.poly.is_empty() {
+                    let cur = ctx
+                        .input(|i| i.pointer.hover_pos())
+                        .filter(|pp| r.contains(*pp))
+                        .map(|pp| {
+                            let sx = crop.x + ((pp.x - r.min.x) / r.width()).clamp(0.0, 1.0) as f64 * crop.w;
+                            let sy = crop.y + ((pp.y - r.min.y) / r.height()).clamp(0.0, 1.0) as f64 * crop.h;
+                            let near = self.poly.len() >= 3
+                                && (sx - self.poly[0].0).hypot(sy - self.poly[0].1) <= 10.0 * crop.w / r.width() as f64;
+                            (to_pv(sx, sy), near)
+                        });
+                    poly_overlay(&p, &to_pv, &self.poly, cur);
+                } else if self.tool != Tool::Polygon {
+                    if let Some(pp) = ctx.input(|i| i.pointer.hover_pos()).filter(|q| r.contains(*q)) {
+                        let ring = (self.brush_r * r.width() as f64 / self.crop.w).max(2.0) as f32;
+                        p.circle_stroke(pp, ring, Stroke::new(1.5_f32, Color32::WHITE));
+                    }
+                }
+            }
         }
     }
+}
+
+/// Add a slider that also moves with the mouse wheel while hovered: `step` per eight scroll
+/// points (one notch typically gives a few steps), snapped to the grid, clamped to `[min, max]`,
+/// and the scroll consumed so the surrounding ScrollArea does not scroll at the same time.
+/// All sliders in this app go through this, so the behaviour is uniform everywhere.
+fn wheel_slider<T: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    accs: &mut HashMap<egui::Id, f64>,
+    value: &mut T,
+    make: impl FnOnce(&mut T) -> egui::Slider<'_>,
+    min: f64,
+    max: f64,
+    step: f64,
+) -> egui::Response {
+    let resp = ui.add(make(value));
+    if resp.hovered() {
+        let dy = ui.input(|i| i.raw_scroll_delta.y);
+        if dy != 0.0 {
+            let acc = accs.entry(resp.id).or_insert(0.0);
+            *acc += dy as f64;
+            let steps = (*acc / 8.0).trunc();
+            if steps != 0.0 {
+                *acc -= steps * 8.0;
+                let v = (T::to_f64(*value) + steps * step).clamp(min, max);
+                *value = T::from_f64((v / step).round() * step);
+            }
+            ui.input_mut(|i| {
+                i.raw_scroll_delta = egui::Vec2::ZERO;
+                i.smooth_scroll_delta = egui::Vec2::ZERO;
+            });
+        }
+    }
+    resp
+}
+
+/// Draw the polygon being placed over any pane: committed segments, the cursor line from
+/// the last vertex, and a thin closing-edge preview that turns yellow at the snap point.
+fn poly_overlay(
+    p: &egui::Painter,
+    to_s: &dyn Fn(f64, f64) -> egui::Pos2,
+    poly: &[(f64, f64)],
+    cur: Option<(egui::Pos2, bool)>,
+) {
+    let line = Stroke::new(1.5_f32, Color32::WHITE);
+    for w in poly.windows(2) {
+        p.line_segment([to_s(w[0].0, w[0].1), to_s(w[1].0, w[1].1)], line);
+    }
+    let start = to_s(poly[0].0, poly[0].1);
+    if let Some((c, near)) = cur {
+        let last = poly[poly.len() - 1];
+        p.line_segment([to_s(last.0, last.1), c], line);
+        if poly.len() >= 3 {
+            p.line_segment(
+                [start, c],
+                Stroke::new(1.0_f32, if near { Color32::YELLOW } else { Color32::from_white_alpha(90) }),
+            );
+        }
+    }
+    for &(fx, fy) in poly {
+        p.circle_filled(to_s(fx, fy), 2.5, Color32::YELLOW);
+    }
+    p.circle_stroke(start, 5.0, Stroke::new(1.5_f32, Color32::YELLOW));
+    p.text(
+        start + vec2(8.0, 4.0),
+        egui::Align2::LEFT_CENTER,
+        "start",
+        egui::FontId::proportional(12.0),
+        Color32::YELLOW,
+    );
+}
+
+/// Nearest-neighbour shrink of a coverage plane, precise enough for tint and proxy use.
+fn decimate_plane(m: &Plane, w: usize, h: usize) -> Plane {
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let sy = (y * m.h / h).min(m.h - 1);
+        for x in 0..w {
+            let sx = (x * m.w / w).min(m.w - 1);
+            out.push(m.data[sy * m.w + sx]);
+        }
+    }
+    Plane::new(w, h, out)
 }
 
 fn cursor_for(h: Handle, dragging: bool) -> egui::CursorIcon {
@@ -1427,7 +1990,17 @@ impl eframe::App for App {
                 self.open_dialog(ctx);
             } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
                 self.quick_save(ctx);
-            } else if self.fit_mode == 0 && self.drag.is_none() {
+            } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
+                if ctx.input(|i| i.modifiers.shift) {
+                    self.redo_mask();
+                } else {
+                    self.undo_mask();
+                }
+            } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) {
+                self.redo_mask();
+            } else if self.tool == Tool::Polygon && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.close_polygon();
+            } else if self.fit_mode == 0 && self.drag.is_none() && self.tool == Tool::Crop {
                 let (dl, dr, du, dd) = ctx.input(|i| {
                     (
                         i.key_pressed(egui::Key::ArrowLeft),
@@ -1535,6 +2108,120 @@ mod interaction {
         }
         assert_eq!(app.crop, before, "idle frames changed the crop box");
         assert!(ctx.fonts(|f| f.has_glyphs(&egui::FontId::proportional(14.0), "⇄→✓")), "symbol fallback font missing glyphs");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn painting_builds_a_mask_that_the_preview_follows() {
+        let path = paint_test_image("ddn_dither_mask_regression.png");
+        let w = 200u32;
+        let ctx = egui::Context::default();
+        let cli = cli::parse(&["ddn-dither".to_string()]).unwrap();
+        let mut app = App::build(&ctx, cli);
+        app.load(&ctx, path.to_str().unwrap());
+
+        app.tool = Tool::Paint;
+        app.dab_at(100.0, 60.0);
+        let v1 = app.mask_version;
+        let m = app.mask.as_ref().expect("first dab creates the mask");
+        assert_eq!(m.w, w as usize, "mask matches the source size");
+        assert_eq!(m.data[60 * w as usize + 100], 255);
+        app.dab_at(100.0, 60.0);
+        assert!(app.mask_version > v1, "each dab invalidates the preview");
+
+        app.tool = Tool::Erase;
+        let before = app.mask.as_ref().unwrap().data.clone();
+        app.dab_at(100.0, 60.0);
+        let after = app.mask.as_ref().unwrap();
+        assert!(after.data[60 * w as usize + 100] < before[60 * w as usize + 100]);
+
+        let key = app.render_key(false);
+        assert!(!key.proxy);
+        assert_eq!(key.mask_version, app.mask_version);
+
+        app.tool = Tool::Crop;
+        app.reset_settings();
+        assert!(app.mask.is_none(), "reset clears the mask");
+        assert!(app.mask_steps.is_empty(), "reset clears the history too");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 200x120 gradient test image in the temp dir, used by the interaction tests.
+    fn paint_test_image(name: &str) -> std::path::PathBuf {
+        let (w, h) = (200u32, 120u32);
+        let mut data = Vec::with_capacity((w * h * 3) as usize);
+        for _ in 0..h {
+            for x in 0..w {
+                data.push((x % 256) as u8);
+                data.push(64);
+                data.push(96);
+            }
+        }
+        let path = std::env::temp_dir().join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        let mut enc = png::Encoder::new(file, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&data).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_click_paints_immediately_and_is_one_step() {
+        let ctx = egui::Context::default();
+        let cli = cli::parse(&["ddn-dither".to_string()]).unwrap();
+        let mut app = App::build(&ctx, cli);
+        let path = paint_test_image("ddn_dither_click_regression.png");
+        app.load(&ctx, path.to_str().unwrap());
+        let w = app.source.as_ref().unwrap().w;
+
+        app.tool = Tool::Paint;
+        app.feed_stroke(100.0, 60.0, true);
+        assert!(app.mask.is_some(), "the first dab lands on press, before any drag");
+        assert_eq!(app.mask.as_ref().unwrap().data[60 * w + 100], 255);
+        app.end_stroke();
+        assert_eq!(app.mask_steps.len(), 1, "a click-and-release is one undo step");
+        assert!(app.mask_open.is_none() && app.stroke.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn touch_up_steps_undo_and_redo_exactly() {
+        let path = paint_test_image("ddn_dither_undo_regression.png");
+        let ctx = egui::Context::default();
+        let cli = cli::parse(&["ddn-dither".to_string()]).unwrap();
+        let mut app = App::build(&ctx, cli);
+        app.load(&ctx, path.to_str().unwrap());
+        let w = app.source.as_ref().unwrap().w;
+
+        app.tool = Tool::Paint;
+        app.open_stroke();
+        app.dab_at(100.0, 60.0);
+        app.stroke = None;
+        app.commit_step();
+        assert_eq!(app.mask_steps.len(), 1, "one stroke is one undo step");
+        let painted = app.mask.as_ref().unwrap().clone();
+        assert_eq!(painted.data[60 * w + 100], 255);
+
+        app.undo_mask();
+        assert!(app.mask.is_none(), "undoing the only stroke empties the mask");
+        app.redo_mask();
+        assert_eq!(app.mask.as_ref().unwrap(), &painted, "redo restores the stroke");
+
+        app.tool = Tool::Erase;
+        app.open_stroke();
+        app.dab_at(100.0, 60.0);
+        app.stroke = None;
+        app.commit_step();
+        let erased = app.mask.as_ref().unwrap().clone();
+        assert!(erased.data[60 * w + 100] < painted.data[60 * w + 100]);
+        app.undo_mask();
+        assert_eq!(app.mask.as_ref().unwrap(), &painted, "undo removes the erase");
+        app.undo_mask();
+        assert!(app.mask.is_none());
+        app.redo_mask();
+        app.redo_mask();
+        assert_eq!(app.mask.as_ref().unwrap(), &erased, "double redo lands on the erase");
         let _ = std::fs::remove_file(&path);
     }
 }

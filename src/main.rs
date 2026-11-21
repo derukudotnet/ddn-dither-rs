@@ -120,6 +120,8 @@ fn convert_one(cli: &Cli, input: &str, pal: &palette::Palette, frame: Option<&Fr
         frame_scale: cli.scale,
         autocontrast: cli.autocontrast,
         gamma: cli.gamma,
+        mask: None,
+        mask_gamma: 1.0,
     };
     params.fit = match cli.crop_mode {
         CropMode::Cover => {
