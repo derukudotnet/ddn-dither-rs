@@ -4,3 +4,4 @@ Cargo.lock.bak
 /assets/frame_*.bin
 /assets/*/frame_*.bin
 !assets/frame_deruku.bin
+/assets/stamps/
