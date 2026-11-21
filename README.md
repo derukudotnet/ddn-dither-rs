@@ -149,6 +149,32 @@ above works without committing any of it:
 
 This repository stays free of third-party art, and every user supplies whatever frames
 they are entitled to use themselves.
+
+### Preparing stamp art
+
+The same guardrail applies to stamps. `tools/splitstamps.py` takes the original
+Game Boy Camera stamp sprite sheets (the Japanese and the international one both
+work) apart automatically:
+
+```sh
+tools/splitstamps.py gbc_stamps_int.png gbc_stamps_jpn.png --contact-sheet
+```
+
+* The sheets are sectioned into cells with 2px gutters of the page purple;
+  the splitter follows those gutters, so every stamp is cut out as a whole.
+* Each stamp's light-purple backdrop becomes transparent alpha, the four stamp
+  greys are kept. Icons drawn straight on the page purple (section captions)
+  are skipped, debris under 3 px is dropped.
+* Identical stamps across all sheets (the two sheets overlap heavily) are
+  detected and written once; `manifest.json` records every leaf with file,
+  source sheet, position, size and the file it duplicates, `--contact-sheet`
+  adds numbered review boards (`cs_*.png`) for eyeballing the result.
+  `--labels` additionally saves the caption art as `lb_*.png`, `--min-size`/
+  `--tol` tune cell detection, `--no-dedupe` writes duplicates too, `-n`
+  previews counts without writing.
+* Output lands in `assets/stamps/` (gitignored); review whatever it produced
+  there and copy the stamps you actually want into a runtime folder for the
+  stamps feature.
 * With a frame, the crop is locked to the window's aspect ratio and the output size is the frame
   size × **Scale** (default 4).
 
@@ -191,5 +217,6 @@ src/io.rs, src/main.rs        file I/O and command line
 src/gui.rs                    window (feature "gui", on by default)
 assets/                       built-in frames (frame_*.bin, auto-registered by build.rs)
                               + frame_deruku_4tone.png, the source of frame_deruku.bin
-tools/                        verification harness and scripts
+tools/                        verification harness and asset scripts
+                              (verify_against_pillow.py, genframe.py, splitstamps.py)
 ```
