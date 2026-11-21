@@ -75,9 +75,10 @@ ddn-dither                                # window, drop an image onto it
   (1.00 = no change). Values below 1.00 brighten shadows and midtones — handy for revealing detail in dark
   photos — values above 1.00 darken.
 * **Touch-up brush** paints areas of the photo that get their own gamma (default 0.50) before the
-  contrast stretch, to lift detail out of dark shadows or darken patches. Crop, Paint, Erase and Clear;
-  the mouse wheel over the source window changes the brush size. The mask is GUI-only and not
-  part of the copied command line.
+  contrast stretch, to lift detail out of dark shadows or darken patches. Crop, Paint, Erase, Poly
+  and Clear; the mouse wheel over the source window changes the brush size; Poly fills a
+  click-by-click polygon (click the first corner again or press Enter to close, right-click to
+  remove a corner). The mask is GUI-only and not part of the copied command line.
 * **Guides** over the crop box: rule-of-thirds lines or a crosshair through the crop centre, to help alignment.
 * **Keyboard**: arrow keys nudge the crop box by one source pixel (Shift = 10), Ctrl+S saves,
   Ctrl+O opens an image, Esc closes the window.

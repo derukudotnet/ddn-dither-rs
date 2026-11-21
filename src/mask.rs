@@ -64,6 +64,43 @@ fn coverage(d: f64, soft: f64) -> f64 {
     }
 }
 
+/// Set or erase the coverage inside a closed polygon with a scanline fill (even-odd rule).
+///
+/// `erase` resets the covered area to 0, otherwise it is set to full coverage.
+/// Edges are hard; the brush with high softness is the tool for fading borders. Fewer than
+/// three points or self-intersecting outlines fall back to the standard even-odd behaviour.
+pub fn fill_polygon(mask: &mut Plane, pts: &[(f64, f64)], erase: bool) {
+    let n = pts.len();
+    if n < 3 || mask.w == 0 || mask.h == 0 {
+        return;
+    }
+    let min_y = pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).floor().max(0.0) as usize;
+    let max_y = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max).ceil() as usize + 1;
+    let (y0, y1) = (min_y.min(mask.h), max_y.min(mask.h));
+    for y in y0..y1 {
+        let yc = y as f64 + 0.5;
+        let mut xs: Vec<f64> = Vec::new();
+        for i in 0..n {
+            let (ax, ay) = pts[i];
+            let (bx, by) = pts[(i + 1) % n];
+            if (ay <= yc && by > yc) || (by <= yc && ay > yc) {
+                xs.push(ax + (yc - ay) / (by - ay) * (bx - ax));
+            }
+        }
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        for [xa, xb] in xs.as_chunks::<2>().0 {
+            let fx0 = (xa.round().max(0.0) as usize).min(mask.w);
+            let fx1 = (xb.round().max(0.0) as usize).min(mask.w);
+            if fx0 >= fx1 {
+                continue;
+            }
+            for x in fx0..fx1 {
+                mask.data[y * mask.w + x] = if erase { 0 } else { 255 };
+            }
+        }
+    }
+}
+
 /// Curve masked pixels toward the gamma `g` (1.0 = no-op), blended by coverage.
 pub fn apply(p: &mut Plane, mask: &Plane, g: f64) {
     debug_assert_eq!((p.w, p.h), (mask.w, mask.h), "mask and plane must match");
@@ -168,6 +205,48 @@ mod tests {
         assert!(near_rim > 0 && near_rim < 255, "still feathering near the rim: {near_rim}");
         let off_centre = mask.data[10 * 21 + 11];
         assert!(off_centre < 255, "even the inner zone is no longer flat");
+    }
+
+    #[test]
+    fn polygon_fill_covers_the_inside_only() {
+        let mut mask = Plane::new(10, 10, vec![0; 100]);
+        fill_polygon(
+            &mut mask,
+            &[(2.0, 2.0), (8.0, 2.0), (8.0, 8.0), (2.0, 8.0)],
+            false,
+        );
+        for y in 0..10 {
+            for x in 0..10 {
+                let want = (2..=7).contains(&x) && (2..=7).contains(&y);
+                assert_eq!(mask.data[y * 10 + x] == 255, want, "pixel {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn polygon_erase_resets_the_inside() {
+        let mut mask = Plane::new(10, 10, vec![0; 100]);
+        let square = [(2.0, 2.0), (8.0, 2.0), (8.0, 8.0), (2.0, 8.0)];
+        fill_polygon(&mut mask, &square, false);
+        dab(&mut mask, 5.0, 5.0, 2.0, 0.5);
+        assert!(mask.data[5 * 10 + 5] == 255);
+        fill_polygon(&mut mask, &square, true);
+        assert!(mask.data.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn polygon_triangle_is_half_the_bounding_square() {
+        let mut mask = Plane::new(8, 8, vec![0; 64]);
+        fill_polygon(&mut mask, &[(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)], false);
+        let covered = mask.data.iter().filter(|&&v| v == 255).count();
+        assert_eq!(covered, 36, "8+7+6+...+1 pixels fill the upper-left triangle");
+    }
+
+    #[test]
+    fn polygon_with_fewer_than_three_points_is_ignored() {
+        let mut mask = Plane::new(4, 4, vec![0; 16]);
+        fill_polygon(&mut mask, &[(1.0, 1.0), (3.0, 3.0)], false);
+        assert!(mask.data.iter().all(|&v| v == 0));
     }
 
     #[test]

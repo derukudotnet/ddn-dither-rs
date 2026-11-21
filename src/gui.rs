@@ -40,6 +40,8 @@ enum Tool {
     Crop,
     Paint,
     Erase,
+    /// Clicked vertices; the shape closes on clicking the first point again or pressing Enter.
+    Polygon,
 }
 
 /// Overlay lines drawn on top of the crop box to help alignment.
@@ -165,6 +167,8 @@ struct App {
     mask_tex: Option<(TextureHandle, u64)>,
     /// Last dabbed position of the current stroke, for interpolating fast pointer moves.
     stroke: Option<(f64, f64)>,
+    /// Vertices of the polygon being drawn with the Polygon tool, in source coordinates.
+    poly: Vec<(f64, f64)>,
 
     frames: Vec<Frame>,
     frame_idx: Option<usize>,
@@ -291,6 +295,7 @@ impl App {
             mask_gamma: BRUSH_GAMMA_DEFAULT,
             mask_tex: None,
             stroke: None,
+            poly: Vec::new(),
             format: cli.format,
             frames,
             frame_idx,
@@ -383,6 +388,7 @@ impl App {
         self.last_aspect = self.aspect();
         self.drag = None;
         self.stroke = None;
+        self.poly.clear();
         self.mask = None;
         self.mask_version += 1;
         self.mask_view = None;
@@ -431,8 +437,23 @@ impl App {
         match self.tool {
             Tool::Paint => mask::dab(m, x, y, self.brush_r, soft),
             Tool::Erase => mask::erase(m, x, y, self.brush_r, soft),
-            Tool::Crop => {}
+            Tool::Polygon | Tool::Crop => {}
         }
+        self.mask_version += 1;
+    }
+
+    /// Fill the drawn polygon into the mask (erasing when the Erase tool is active).
+    fn close_polygon(&mut self) {
+        let pts = std::mem::take(&mut self.poly);
+        if pts.len() < 3 {
+            return;
+        }
+        let (w, h) = match &self.source {
+            Some(s) => (s.w, s.h),
+            None => return,
+        };
+        let m = self.mask.get_or_insert_with(|| Plane::new(w, h, vec![0; w * h]));
+        mask::fill_polygon(m, &pts, self.tool == Tool::Erase);
         self.mask_version += 1;
     }
 
@@ -984,31 +1005,33 @@ impl App {
                     ui.add(egui::Button::new(label))
                 }
             };
-            if toggle(ui, "Crop", self.tool == Tool::Crop)
-                .on_hover_text("Back to moving and resizing the selection rectangle.")
-                .clicked()
-            {
-                self.tool = Tool::Crop;
-            }
-            if toggle(ui, "Paint", self.tool == Tool::Paint)
-                .on_hover_text("Paint areas that the Gamma slider below brightens or darkens - for lifting detail out of dark shadows. Mouse wheel over the picture changes the brush size.")
-                .clicked()
-            {
-                self.tool = Tool::Paint;
-            }
-            if toggle(ui, "Erase", self.tool == Tool::Erase)
-                .on_hover_text("Remove painted areas; the brush size follows the mouse wheel over the picture, too.")
-                .clicked()
-            {
-                self.tool = Tool::Erase;
+            for (label, tool) in [
+                ("Crop", Tool::Crop),
+                ("Paint", Tool::Paint),
+                ("Erase", Tool::Erase),
+                ("Poly", Tool::Polygon),
+            ] {
+                if toggle(ui, label, self.tool == tool)
+                    .on_hover_text(match tool {
+                        Tool::Crop => "Back to moving and resizing the selection rectangle.",
+                        Tool::Paint => "Paint areas that the Gamma slider below brightens or darkens - for lifting detail out of dark shadows. Mouse wheel over the picture changes the brush size.",
+                        Tool::Erase => "Remove painted areas; the brush size follows the mouse wheel over the picture, too.",
+                        Tool::Polygon => "Fill a polygon region with full strength: click the corners, click the first corner again (it highlights) or press Enter to close the shape, right-click removes the last corner. With the Erase tool active, a polygon erases its region instead.",
+                    })
+                    .clicked()
+                {
+                    self.tool = tool;
+                    self.poly.clear();
+                }
             }
             if ui
                 .add_enabled(self.mask.is_some(), egui::Button::new("Clear"))
-                .on_hover_text("Remove all painted areas.")
+                .on_hover_text("Remove all painted and filled areas.")
                 .clicked()
             {
                 self.mask = None;
                 self.mask_version += 1;
+                self.poly.clear();
             }
         });
         if self.tool != Tool::Crop {
@@ -1025,7 +1048,9 @@ impl App {
                 }
             })
             .response
-            .on_hover_text("Curve applied where you painted, before the contrast stretch. Below 1.00 brightens, above 1.00 darkens. Arrow keys, mouse wheel over the box or dragging all move in 0.05 steps.");
+            .on_hover_text("Strength applied where you painted or filled (Polygon), before the contrast stretch. Below 1.00 brightens, above 1.00 darkens. Arrow keys, mouse wheel over the box or dragging all move in 0.05 steps.");
+        }
+        if matches!(self.tool, Tool::Paint | Tool::Erase) {
             ui.horizontal(|ui| {
                 ui.label("Softness");
                 wheel_slider(ui, &mut self.wheel_acc, &mut self.brush_soft, |v| {
@@ -1042,6 +1067,9 @@ impl App {
                 self.source.as_ref().map(|s| s.w).unwrap_or(0),
                 self.source.as_ref().map(|s| s.h).unwrap_or(0)
             ));
+        }
+        if self.tool == Tool::Polygon {
+            ui.weak("Click the corners; click the first corner again or press Enter to fill; right-click removes a corner.");
         }
         ui.separator();
 
@@ -1296,25 +1324,40 @@ impl App {
             if let Some(pos) = resp.interact_pointer_pos() {
                 let (px, py) = to_img(pos);
                 let (ix, iy) = (px.clamp(0.0, iw), py.clamp(0.0, ih));
-                if resp.drag_started() {
-                    self.stroke = Some((ix, iy));
-                    self.dab_at(ix, iy);
-                } else if resp.dragged() {
-                    if let Some((lx, ly)) = self.stroke {
-                        let step = (self.brush_r / 4.0).max(1.0);
-                        let dist = (ix - lx).hypot(iy - ly);
-                        if dist > 0.0 {
-                            let n = ((dist / step).floor() as usize).max(1);
-                            for k in 1..=n {
-                                let t = k as f64 / n as f64;
-                                self.dab_at(lx + (ix - lx) * t, ly + (iy - ly) * t);
-                            }
+                if self.tool == Tool::Polygon {
+                    if resp.secondary_clicked() {
+                        self.poly.pop();
+                    } else if resp.drag_started_by(egui::PointerButton::Primary) {
+                        let snap = 10.0 / scale;
+                        let near_start = self.poly.len() >= 3
+                            && self.poly.first().is_some_and(|(fx, fy)| (ix - fx).hypot(iy - fy) <= snap);
+                        if near_start {
+                            self.close_polygon();
+                        } else {
+                            self.poly.push((ix, iy));
                         }
                     }
-                    self.stroke = Some((ix, iy));
-                }
-                if resp.drag_stopped() {
-                    self.stroke = None;
+                } else {
+                    if resp.drag_started() {
+                        self.stroke = Some((ix, iy));
+                        self.dab_at(ix, iy);
+                    } else if resp.dragged() {
+                        if let Some((lx, ly)) = self.stroke {
+                            let step = (self.brush_r / 4.0).max(1.0);
+                            let dist = (ix - lx).hypot(iy - ly);
+                            if dist > 0.0 {
+                                let n = ((dist / step).floor() as usize).max(1);
+                                for k in 1..=n {
+                                    let t = k as f64 / n as f64;
+                                    self.dab_at(lx + (ix - lx) * t, ly + (iy - ly) * t);
+                                }
+                            }
+                        }
+                        self.stroke = Some((ix, iy));
+                    }
+                    if resp.drag_stopped() {
+                        self.stroke = None;
+                    }
                 }
             }
         }
@@ -1417,7 +1460,25 @@ impl App {
         if let Some((mtex, _)) = &self.mask_tex {
             painter.image(mtex.id(), img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
-        if brushing {
+        if !self.poly.is_empty() {
+            let line = Stroke::new(1.5_f32, Color32::WHITE);
+            for w in self.poly.windows(2) {
+                painter.line_segment([to_screen(w[0].0, w[0].1), to_screen(w[1].0, w[1].1)], line);
+            }
+            let start = to_screen(self.poly[0].0, self.poly[0].1);
+            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|p| img_rect.contains(*p)) {
+                let (ix, iy) = to_img(pos);
+                let snap = 10.0 / scale;
+                let near = self.poly.len() >= 3 && (ix - self.poly[0].0).hypot(iy - self.poly[0].1) <= snap;
+                painter.line_segment([start, to_screen(ix, iy)], Stroke::new(1.5_f32, if near { Color32::YELLOW } else { Color32::WHITE }));
+            }
+            for &(fx, fy) in &self.poly {
+                painter.circle_filled(to_screen(fx, fy), 2.5, Color32::YELLOW);
+            }
+            painter.circle_stroke(start, 5.0, Stroke::new(1.5_f32, Color32::YELLOW));
+            painter.text(start + vec2(8.0, 4.0), egui::Align2::LEFT_CENTER, "start", egui::FontId::proportional(12.0), Color32::YELLOW);
+        }
+        if brushing && self.tool != Tool::Polygon {
             if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|p| img_rect.contains(*p)) {
                 let (ix, iy) = to_img(pos);
                 painter.circle_stroke(to_screen(ix, iy), (self.brush_r * scale) as f32, Stroke::new(1.5_f32, Color32::WHITE));
@@ -1696,6 +1757,8 @@ impl eframe::App for App {
                 self.open_dialog(ctx);
             } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
                 self.quick_save(ctx);
+            } else if self.tool == Tool::Polygon && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.close_polygon();
             } else if self.fit_mode == 0 && self.drag.is_none() && self.tool == Tool::Crop {
                 let (dl, dr, du, dd) = ctx.input(|i| {
                     (
