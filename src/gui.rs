@@ -564,6 +564,44 @@ impl App {
         }
     }
 
+    /// Feed one pointer position (source pixels) to the active Paint/Erase stroke.
+    fn feed_stroke(&mut self, x: f64, y: f64, new_stroke: bool) {
+        if new_stroke {
+            self.open_stroke();
+            self.stroke = Some((x, y));
+            self.dab_at(x, y);
+            return;
+        }
+        if let Some((lx, ly)) = self.stroke {
+            let step = (self.brush_r / 4.0).max(1.0);
+            let dist = (x - lx).hypot(y - ly);
+            if dist > 0.0 {
+                let n = ((dist / step).floor() as usize).max(1);
+                for k in 1..=n {
+                    let t = k as f64 / n as f64;
+                    self.dab_at(lx + (x - lx) * t, ly + (y - ly) * t);
+                }
+            }
+        }
+        self.stroke = Some((x, y));
+    }
+
+    /// Finish the active stroke and commit it as one undo step.
+    fn end_stroke(&mut self) {
+        self.stroke = None;
+        self.commit_step();
+    }
+
+    /// Place a polygon vertex, or close the shape when clicking near the first one.
+    fn place_poly_vertex(&mut self, x: f64, y: f64, snap: f64) {
+        let near = self.poly.len() >= 3 && self.poly.first().is_some_and(|(fx, fy)| (x - fx).hypot(y - fy) <= snap);
+        if near {
+            self.close_polygon();
+        } else {
+            self.poly.push((x, y));
+        }
+    }
+
     /// Keep the proxy-resolution mask copy in step while fast (drag/stroke) renders run.
     fn sync_mask_view(&mut self, use_proxy: bool) {
         if !use_proxy {
@@ -589,7 +627,7 @@ impl App {
             self.mask_tex = None;
             return;
         };
-        if self.stroke.is_some() || self.mask_tex.as_ref().map(|(_, v)| *v) == Some(self.mask_version) {
+        if self.mask_tex.as_ref().map(|(_, v)| *v) == Some(self.mask_version) {
             return;
         }
         let s = MASK_TINT_MAX.min(m.w.max(m.h)) as f64 / m.w.max(m.h) as f64;
@@ -1125,9 +1163,9 @@ impl App {
                 if toggle(ui, label, self.tool == tool)
                     .on_hover_text(match tool {
                         Tool::Crop => "Back to moving and resizing the selection rectangle.",
-                        Tool::Paint => "Paint areas that the Gamma slider below brightens or darkens - for lifting detail out of dark shadows. Mouse wheel over the picture changes the brush size.",
+                        Tool::Paint => "Paint areas that the Gamma slider below brightens or darkens - for lifting detail out of dark shadows. Mouse wheel over the picture or the preview changes the brush size; you can paint in both windows.",
                         Tool::Erase => "Remove painted areas; the brush size follows the mouse wheel over the picture, too.",
-                        Tool::Polygon => "Fill a polygon region: click the corners, click the first corner again (it highlights) or press Enter to close the shape, right-click removes the last corner. Edges feather outward by Softness of the brush radius. With the Erase tool active, a polygon erases its region instead.",
+                        Tool::Polygon => "Fill a polygon region: click the corners, click the first corner again (it highlights) or press Enter to close the shape, right-click removes the last corner. Edges feather outward by Softness of the brush radius. Works in the source and the preview window alike. With the Erase tool active, a polygon erases its region instead.",
                     })
                     .clicked()
                 {
@@ -1196,7 +1234,7 @@ impl App {
             ));
         }
         if self.tool == Tool::Polygon {
-            ui.weak("Click the corners; click the first corner again or press Enter to fill; right-click removes a corner. Edge glow = Softness % of the brush radius (wheel over the picture).");
+            ui.weak("Click the corners; click the first corner again or press Enter to fill; right-click removes a corner. Edge glow = Softness % of the brush radius. Paint in either window; the wheel changes the brush size over both.");
         }
         ui.separator();
 
@@ -1456,36 +1494,16 @@ impl App {
                         self.poly.pop();
                     } else if resp.clicked() {
                         let snap = 10.0 / scale;
-                        let near_start = self.poly.len() >= 3
-                            && self.poly.first().is_some_and(|(fx, fy)| (ix - fx).hypot(iy - fy) <= snap);
-                        if near_start {
-                            self.close_polygon();
-                        } else {
-                            self.poly.push((ix, iy));
-                        }
+                        self.place_poly_vertex(ix, iy, snap);
                     }
                 } else {
                     if resp.drag_started() {
-                        self.open_stroke();
-                        self.stroke = Some((ix, iy));
-                        self.dab_at(ix, iy);
+                        self.feed_stroke(ix, iy, true);
                     } else if resp.dragged() {
-                        if let Some((lx, ly)) = self.stroke {
-                            let step = (self.brush_r / 4.0).max(1.0);
-                            let dist = (ix - lx).hypot(iy - ly);
-                            if dist > 0.0 {
-                                let n = ((dist / step).floor() as usize).max(1);
-                                for k in 1..=n {
-                                    let t = k as f64 / n as f64;
-                                    self.dab_at(lx + (ix - lx) * t, ly + (iy - ly) * t);
-                                }
-                            }
-                        }
-                        self.stroke = Some((ix, iy));
+                        self.feed_stroke(ix, iy, false);
                     }
                     if resp.drag_stopped() {
-                        self.stroke = None;
-                        self.commit_step();
+                        self.end_stroke();
                     }
                 }
             }
@@ -1590,30 +1608,15 @@ impl App {
             painter.image(mtex.id(), img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
         if !self.poly.is_empty() {
-            let line = Stroke::new(1.5_f32, Color32::WHITE);
-            for w in self.poly.windows(2) {
-                painter.line_segment([to_screen(w[0].0, w[0].1), to_screen(w[1].0, w[1].1)], line);
-            }
-            let start = to_screen(self.poly[0].0, self.poly[0].1);
-            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|p| img_rect.contains(*p)) {
-                let (ix, iy) = to_img(pos);
-                let snap = 10.0 / scale;
-                let near = self.poly.len() >= 3 && (ix - self.poly[0].0).hypot(iy - self.poly[0].1) <= snap;
-                let cursor = to_screen(ix, iy);
-                let last = *self.poly.last().unwrap();
-                painter.line_segment([to_screen(last.0, last.1), cursor], line);
-                if self.poly.len() >= 3 {
-                    painter.line_segment(
-                        [start, cursor],
-                        Stroke::new(1.0_f32, if near { Color32::YELLOW } else { Color32::from_white_alpha(90) }),
-                    );
-                }
-            }
-            for &(fx, fy) in &self.poly {
-                painter.circle_filled(to_screen(fx, fy), 2.5, Color32::YELLOW);
-            }
-            painter.circle_stroke(start, 5.0, Stroke::new(1.5_f32, Color32::YELLOW));
-            painter.text(start + vec2(8.0, 4.0), egui::Align2::LEFT_CENTER, "start", egui::FontId::proportional(12.0), Color32::YELLOW);
+            let cur = ctx
+                .input(|i| i.pointer.hover_pos())
+                .filter(|p| img_rect.contains(*p))
+                .map(|pos| {
+                    let (ix, iy) = to_img(pos);
+                    let near = self.poly.len() >= 3 && (ix - self.poly[0].0).hypot(iy - self.poly[0].1) <= 10.0 / scale;
+                    (to_screen(ix, iy), near)
+                });
+            poly_overlay(&painter, &to_screen, &self.poly, cur);
         }
         if brushing && self.tool != Tool::Polygon {
             if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|p| img_rect.contains(*p)) {
@@ -1702,11 +1705,11 @@ impl App {
                 ((nh * s - pv_rect.height()) / 2.0).max(0.0),
             );
             let cl = |v: f32, o: f32| v.clamp(-o, o);
-            if pv_resp.dragged() {
+            if pv_resp.dragged() && self.tool == Tool::Crop {
                 let d = pv_resp.drag_delta();
                 self.pv_pan = (cl(self.pv_pan.0 + d.x, ov.0), cl(self.pv_pan.1 + d.y, ov.1));
             }
-            if pv_resp.hovered() {
+            if pv_resp.hovered() && self.tool == Tool::Crop {
                 let dz = ctx.input(|i| i.raw_scroll_delta.y);
                 if dz != 0.0 {
                     let z0 = self.preview_zoom.unwrap_or(if fit >= 1.0 { fit.floor() } else { fit });
@@ -1724,11 +1727,11 @@ impl App {
                     self.preview_zoom = Some(z);
                 }
             }
-            if pv_resp.double_clicked() {
+            if pv_resp.double_clicked() && self.tool == Tool::Crop {
                 self.preview_zoom = None;
                 self.pv_pan = (0.0, 0.0);
             }
-            if self.preview_zoom.is_some() && (pv_resp.hovered() || pv_resp.dragged()) {
+            if self.tool == Tool::Crop && self.preview_zoom.is_some() && (pv_resp.hovered() || pv_resp.dragged()) {
                 ctx.set_cursor_icon(if pv_resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
             }
             let r = Rect::from_center_size(
@@ -1737,6 +1740,63 @@ impl App {
             );
             let p = ui.painter_at(pv_rect);
             p.image(tex_id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            if self.tool != Tool::Crop {
+                if pv_resp.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                }
+                let crop = self.crop;
+                let to_pv = |sx: f64, sy: f64| {
+                    pos2(
+                        r.min.x + (((sx - crop.x) / crop.w) * r.width() as f64) as f32,
+                        r.min.y + (((sy - crop.y) / crop.h) * r.height() as f64) as f32,
+                    )
+                };
+                if pv_resp.hovered() {
+                    let dz = ctx.input(|i| i.raw_scroll_delta.y);
+                    if dz != 0.0 {
+                        self.brush_r = (self.brush_r * (dz as f64 / 160.0).exp()).clamp(4.0, iw.min(ih) / 2.0);
+                    }
+                }
+                if let Some(pos) = pv_resp.interact_pointer_pos() {
+                    let sx = crop.x + ((pos.x - r.min.x) / r.width()).clamp(0.0, 1.0) as f64 * crop.w;
+                    let sy = crop.y + ((pos.y - r.min.y) / r.height()).clamp(0.0, 1.0) as f64 * crop.h;
+                    if self.tool == Tool::Polygon {
+                        if pv_resp.secondary_clicked() {
+                            self.poly.pop();
+                        } else if pv_resp.clicked() {
+                            let snap = 10.0 * crop.w / r.width() as f64;
+                            self.place_poly_vertex(sx, sy, snap);
+                        }
+                    } else {
+                        if pv_resp.drag_started() {
+                            self.feed_stroke(sx, sy, true);
+                        } else if pv_resp.dragged() {
+                            self.feed_stroke(sx, sy, false);
+                        }
+                        if pv_resp.drag_stopped() {
+                            self.end_stroke();
+                        }
+                    }
+                }
+                if !self.poly.is_empty() {
+                    let cur = ctx
+                        .input(|i| i.pointer.hover_pos())
+                        .filter(|pp| r.contains(*pp))
+                        .map(|pp| {
+                            let sx = crop.x + ((pp.x - r.min.x) / r.width()).clamp(0.0, 1.0) as f64 * crop.w;
+                            let sy = crop.y + ((pp.y - r.min.y) / r.height()).clamp(0.0, 1.0) as f64 * crop.h;
+                            let near = self.poly.len() >= 3
+                                && (sx - self.poly[0].0).hypot(sy - self.poly[0].1) <= 10.0 * crop.w / r.width() as f64;
+                            (to_pv(sx, sy), near)
+                        });
+                    poly_overlay(&p, &to_pv, &self.poly, cur);
+                } else if self.tool != Tool::Polygon {
+                    if let Some(pp) = ctx.input(|i| i.pointer.hover_pos()).filter(|q| r.contains(*q)) {
+                        let ring = (self.brush_r * r.width() as f64 / self.crop.w).max(2.0) as f32;
+                        p.circle_stroke(pp, ring, Stroke::new(1.5_f32, Color32::WHITE));
+                    }
+                }
+            }
         }
     }
 }
@@ -1773,6 +1833,42 @@ fn wheel_slider<T: egui::emath::Numeric>(
         }
     }
     resp
+}
+
+/// Draw the polygon being placed over any pane: committed segments, the cursor line from
+/// the last vertex, and a thin closing-edge preview that turns yellow at the snap point.
+fn poly_overlay(
+    p: &egui::Painter,
+    to_s: &dyn Fn(f64, f64) -> egui::Pos2,
+    poly: &[(f64, f64)],
+    cur: Option<(egui::Pos2, bool)>,
+) {
+    let line = Stroke::new(1.5_f32, Color32::WHITE);
+    for w in poly.windows(2) {
+        p.line_segment([to_s(w[0].0, w[0].1), to_s(w[1].0, w[1].1)], line);
+    }
+    let start = to_s(poly[0].0, poly[0].1);
+    if let Some((c, near)) = cur {
+        let last = poly[poly.len() - 1];
+        p.line_segment([to_s(last.0, last.1), c], line);
+        if poly.len() >= 3 {
+            p.line_segment(
+                [start, c],
+                Stroke::new(1.0_f32, if near { Color32::YELLOW } else { Color32::from_white_alpha(90) }),
+            );
+        }
+    }
+    for &(fx, fy) in poly {
+        p.circle_filled(to_s(fx, fy), 2.5, Color32::YELLOW);
+    }
+    p.circle_stroke(start, 5.0, Stroke::new(1.5_f32, Color32::YELLOW));
+    p.text(
+        start + vec2(8.0, 4.0),
+        egui::Align2::LEFT_CENTER,
+        "start",
+        egui::FontId::proportional(12.0),
+        Color32::YELLOW,
+    );
 }
 
 /// Nearest-neighbour shrink of a coverage plane, precise enough for tint and proxy use.
@@ -2017,22 +2113,8 @@ mod interaction {
 
     #[test]
     fn painting_builds_a_mask_that_the_preview_follows() {
-        let (w, h) = (200u32, 120u32);
-        let mut data = Vec::with_capacity((w * h * 3) as usize);
-        for _ in 0..h {
-            for x in 0..w {
-                data.push((x % 256) as u8);
-                data.push(64);
-                data.push(96);
-            }
-        }
-        let path = std::env::temp_dir().join("ddn_dither_mask_regression.png");
-        let file = std::fs::File::create(&path).unwrap();
-        let mut enc = png::Encoder::new(file, w, h);
-        enc.set_color(png::ColorType::Rgb);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.write_header().unwrap().write_image_data(&data).unwrap();
-
+        let path = paint_test_image("ddn_dither_mask_regression.png");
+        let w = 200u32;
         let ctx = egui::Context::default();
         let cli = cli::parse(&["ddn-dither".to_string()]).unwrap();
         let mut app = App::build(&ctx, cli);
@@ -2064,8 +2146,8 @@ mod interaction {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn touch_up_steps_undo_and_redo_exactly() {
+    /// 200x120 gradient test image in the temp dir, used by the interaction tests.
+    fn paint_test_image(name: &str) -> std::path::PathBuf {
         let (w, h) = (200u32, 120u32);
         let mut data = Vec::with_capacity((w * h * 3) as usize);
         for _ in 0..h {
@@ -2075,13 +2157,37 @@ mod interaction {
                 data.push(96);
             }
         }
-        let path = std::env::temp_dir().join("ddn_dither_undo_regression.png");
+        let path = std::env::temp_dir().join(name);
         let file = std::fs::File::create(&path).unwrap();
         let mut enc = png::Encoder::new(file, w, h);
         enc.set_color(png::ColorType::Rgb);
         enc.set_depth(png::BitDepth::Eight);
         enc.write_header().unwrap().write_image_data(&data).unwrap();
+        path
+    }
 
+    #[test]
+    fn a_click_paints_immediately_and_is_one_step() {
+        let ctx = egui::Context::default();
+        let cli = cli::parse(&["ddn-dither".to_string()]).unwrap();
+        let mut app = App::build(&ctx, cli);
+        let path = paint_test_image("ddn_dither_click_regression.png");
+        app.load(&ctx, path.to_str().unwrap());
+        let w = app.source.as_ref().unwrap().w;
+
+        app.tool = Tool::Paint;
+        app.feed_stroke(100.0, 60.0, true);
+        assert!(app.mask.is_some(), "the first dab lands on press, before any drag");
+        assert_eq!(app.mask.as_ref().unwrap().data[60 * w + 100], 255);
+        app.end_stroke();
+        assert_eq!(app.mask_steps.len(), 1, "a click-and-release is one undo step");
+        assert!(app.mask_open.is_none() && app.stroke.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn touch_up_steps_undo_and_redo_exactly() {
+        let path = paint_test_image("ddn_dither_undo_regression.png");
         let ctx = egui::Context::default();
         let cli = cli::parse(&["ddn-dither".to_string()]).unwrap();
         let mut app = App::build(&ctx, cli);

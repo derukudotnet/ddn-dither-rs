@@ -76,7 +76,8 @@ ddn-dither                                # window, drop an image onto it
   photos — values above 1.00 darken.
 * **Touch-up brush** paints areas of the photo that get their own gamma (default 0.50) before the
   contrast stretch, to lift detail out of dark shadows or darken patches. Crop, Paint, Erase, Poly
-  and Clear; the mouse wheel over the source window changes the brush size; Poly fills a
+  and Clear; the mouse wheel over the source window or the preview changes the brush size, and
+  you can paint in both windows alike (preview strokes map through the crop box); Poly fills a
   click-by-click polygon (click the first corner again or press Enter to close, right-click to
   remove a corner); polygon edges feather outward by Softness % of the brush radius; Undo/Redo
   (Ctrl+Z, Ctrl+Y) rewinds and replays whole strokes or fills while keeping only the step list.
