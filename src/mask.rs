@@ -158,6 +158,66 @@ pub fn apply(p: &mut Plane, mask: &Plane, g: f64) {
     }
 }
 
+
+/// One recorded touch-up action, replayable in order to rebuild the mask.
+///
+/// Brush parameters are frozen when the action is created, so replaying after the
+/// sliders have moved reproduces exactly what was painted at the time.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Step {
+    /// Brush dabs along `pts`, in source pixel positions.
+    Brush {
+        erase: bool,
+        radius: f64,
+        soft: f64,
+        pts: Vec<(f64, f64)>,
+    },
+    /// A closed polygon fill feathering outward by `feather` pixels.
+    Polygon {
+        erase: bool,
+        feather: f64,
+        pts: Vec<(f64, f64)>,
+    },
+    /// Removes all coverage recorded so far.
+    Clear,
+}
+
+/// Rebuild the coverage by applying `steps` in order, optionally starting from a
+/// previously taken `(step_count, plane)` checkpoint to shorten the replay.
+///
+/// Returns `None` when no painting happened since a `Clear` or when `steps` is empty.
+pub fn replay(steps: &[Step], w: usize, h: usize, checkpoint: Option<(usize, &Plane)>) -> Option<Plane> {
+    let mut out: Option<Plane> = None;
+    let mut start = 0usize;
+    if let Some((n, plane)) = checkpoint {
+        if n <= steps.len() && (plane.w, plane.h) == (w, h) {
+            out = Some(plane.clone());
+            start = n;
+        }
+    }
+    for step in &steps[start..] {
+        match step {
+            Step::Clear => out = None,
+            Step::Brush { erase: do_erase, radius, soft, pts } => {
+                let (r, s) = (*radius, *soft);
+                let m = out.get_or_insert_with(|| Plane::new(w, h, vec![0; w * h]));
+                for &(x, y) in pts {
+                    if *do_erase {
+                        erase(m, x, y, r, s);
+                    } else {
+                        dab(m, x, y, r, s);
+                    }
+                }
+            }
+            Step::Polygon { erase, feather, pts } => {
+                let m = out.get_or_insert_with(|| Plane::new(w, h, vec![0; w * h]));
+                fill_polygon(m, pts, *feather, *erase);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +367,59 @@ mod tests {
         let mut mask = Plane::new(4, 4, vec![0; 16]);
         fill_polygon(&mut mask, &[(1.0, 1.0), (3.0, 3.0)], 0.0, false);
         assert!(mask.data.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn replay_matches_live_dabbing() {
+        let mut live = Plane::new(40, 40, vec![0; 1600]);
+        dab(&mut live, 10.0, 10.0, 6.0, 0.5);
+        dab(&mut live, 20.0, 12.0, 6.0, 0.0);
+        erase(&mut live, 10.0, 10.0, 4.0, 0.0);
+        let steps = [
+            Step::Brush { erase: false, radius: 6.0, soft: 0.5, pts: vec![(10.0, 10.0)] },
+            Step::Brush { erase: false, radius: 6.0, soft: 0.0, pts: vec![(20.0, 12.0)] },
+            Step::Brush { erase: true, radius: 4.0, soft: 0.0, pts: vec![(10.0, 10.0)] },
+        ];
+        assert_eq!(replay(&steps, 40, 40, None).unwrap(), live);
+    }
+
+    #[test]
+    fn dropping_the_last_step_changes_the_replay() {
+        let steps = [
+            Step::Brush { erase: false, radius: 6.0, soft: 0.0, pts: vec![(10.0, 10.0)] },
+            Step::Brush { erase: false, radius: 6.0, soft: 0.0, pts: vec![(25.0, 25.0)] },
+        ];
+        let with_both = replay(&steps, 40, 40, None).unwrap();
+        let undone = replay(&steps[..1], 40, 40, None).unwrap();
+        assert_ne!(with_both, undone);
+        assert_eq!(undone.data[10 * 40 + 10], 255);
+        assert_eq!(undone.data[25 * 40 + 25], 0);
+    }
+
+    #[test]
+    fn replaying_from_a_checkpoint_matches_a_full_replay() {
+        let steps = [
+            Step::Brush { erase: false, radius: 6.0, soft: 0.0, pts: vec![(10.0, 10.0)] },
+            Step::Brush { erase: false, radius: 6.0, soft: 0.0, pts: vec![(25.0, 25.0)] },
+            Step::Brush { erase: false, radius: 4.0, soft: 0.5, pts: vec![(18.0, 12.0)] },
+        ];
+        let ckpt = replay(&steps[..2], 40, 40, None).unwrap();
+        assert_eq!(replay(&steps, 40, 40, Some((2, &ckpt))).unwrap(), replay(&steps, 40, 40, None).unwrap());
+        let fresh = Plane::new(8, 8, vec![0; 64]);
+        assert_eq!(replay(&steps, 40, 40, Some((2, &fresh))).unwrap(), replay(&steps, 40, 40, None).unwrap());
+    }
+
+    #[test]
+    fn a_clear_step_empties_the_replay_until_new_painting() {
+        let steps = [
+            Step::Brush { erase: false, radius: 6.0, soft: 0.0, pts: vec![(10.0, 10.0)] },
+            Step::Clear,
+            Step::Brush { erase: false, radius: 4.0, soft: 0.0, pts: vec![(30.0, 30.0)] },
+        ];
+        assert!(replay(&steps[..2], 40, 40, None).is_none());
+        let after = replay(&steps, 40, 40, None).unwrap();
+        assert_eq!(after.data[30 * 40 + 30], 255);
+        assert_eq!(after.data[10 * 40 + 10], 0);
     }
 
     #[test]

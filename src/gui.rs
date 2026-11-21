@@ -26,6 +26,9 @@ const PROXY_MAX: usize = 1200;
 const DISPLAY_MAX: usize = 2048;
 /// Brush gamma that fresh paint starts with (brightens, the common touch-up case).
 const BRUSH_GAMMA_DEFAULT: f64 = 0.5;
+
+/// Re-snapshot the mask after this many committed steps, to bound how far replays reach.
+const CHECKPOINT_EVERY: usize = 10;
 /// Brush softness on load, as a percentage of the radius spent feathering.
 const BRUSH_SOFT_DEFAULT: f64 = 50.0;
 /// Slider range shared by the global and the brush gamma (log-symmetrical around 1.00).
@@ -169,6 +172,14 @@ struct App {
     stroke: Option<(f64, f64)>,
     /// Vertices of the polygon being drawn with the Polygon tool, in source coordinates.
     poly: Vec<(f64, f64)>,
+    /// Committed touch-up steps; replaying them rebuilds the mask (also for undo/redo).
+    mask_steps: Vec<mask::Step>,
+    /// Steps undone since the last new stroke, replayed on redo.
+    mask_redo: Vec<mask::Step>,
+    /// The stroke currently being drawn, committed as one step when the pointer is released.
+    mask_open: Option<mask::Step>,
+    /// Mask snapshot at a known step count, so replays start somewhere recent.
+    mask_ckpt: Option<(usize, Plane)>,
 
     frames: Vec<Frame>,
     frame_idx: Option<usize>,
@@ -296,6 +307,10 @@ impl App {
             mask_tex: None,
             stroke: None,
             poly: Vec::new(),
+            mask_steps: Vec::new(),
+            mask_redo: Vec::new(),
+            mask_open: None,
+            mask_ckpt: None,
             format: cli.format,
             frames,
             frame_idx,
@@ -393,6 +408,10 @@ impl App {
         self.mask_version += 1;
         self.mask_view = None;
         self.mask_tex = None;
+        self.mask_steps.clear();
+        self.mask_redo.clear();
+        self.mask_open = None;
+        self.mask_ckpt = None;
         self.brush_r = (w.min(h) as f64 / 12.0).max(4.0);
         self.last_key = None;
         self.status = format!("Loaded {path} ({w}x{h})");
@@ -431,13 +450,22 @@ impl App {
     /// Paint or erase one brush dab in source coordinates.
     fn dab_at(&mut self, x: f64, y: f64) {
         let Some(src) = self.source.as_ref() else { return };
+        if !matches!(self.tool, Tool::Paint | Tool::Erase) {
+            return;
+        }
         let (w, h) = (src.w, src.h);
+        let (erase, r, soft) = match &mut self.mask_open {
+            Some(mask::Step::Brush { erase, radius, soft, pts }) => {
+                pts.push((x, y));
+                (*erase, *radius, *soft)
+            }
+            _ => (self.tool == Tool::Erase, self.brush_r, (self.brush_soft / 100.0).clamp(0.0, 0.95)),
+        };
         let m = self.mask.get_or_insert_with(|| Plane::new(w, h, vec![0; w * h]));
-        let soft = (self.brush_soft / 100.0).clamp(0.0, 0.95);
-        match self.tool {
-            Tool::Paint => mask::dab(m, x, y, self.brush_r, soft),
-            Tool::Erase => mask::erase(m, x, y, self.brush_r, soft),
-            Tool::Polygon | Tool::Crop => {}
+        if erase {
+            mask::erase(m, x, y, r, soft);
+        } else {
+            mask::dab(m, x, y, r, soft);
         }
         self.mask_version += 1;
     }
@@ -452,9 +480,88 @@ impl App {
             Some(s) => (s.w, s.h),
             None => return,
         };
+        let feather = self.brush_r * self.brush_soft / 100.0;
+        let erase = self.tool == Tool::Erase;
         let m = self.mask.get_or_insert_with(|| Plane::new(w, h, vec![0; w * h]));
-        mask::fill_polygon(m, &pts, self.brush_r * self.brush_soft / 100.0, self.tool == Tool::Erase);
+        mask::fill_polygon(m, &pts, feather, erase);
         self.mask_version += 1;
+        self.mask_redo.clear();
+        self.mask_steps.push(mask::Step::Polygon { erase, feather, pts });
+        self.take_checkpoint();
+    }
+
+    /// Begin an undoable brush stroke with the current tool and brush settings.
+    fn open_stroke(&mut self) {
+        self.mask_open = Some(mask::Step::Brush {
+            erase: self.tool == Tool::Erase,
+            radius: self.brush_r,
+            soft: (self.brush_soft / 100.0).clamp(0.0, 0.95),
+            pts: Vec::new(),
+        });
+    }
+
+    /// Close the brush stroke and remember it as one undo step.
+    fn commit_step(&mut self) {
+        let Some(step) = self.mask_open.take() else { return };
+        if let mask::Step::Brush { pts, .. } = &step {
+            if pts.is_empty() {
+                return;
+            }
+        }
+        self.mask_redo.clear();
+        self.mask_steps.push(step);
+        self.take_checkpoint();
+    }
+
+    /// Snapshot the mask every few committed steps, bounding how far replays reach.
+    fn take_checkpoint(&mut self) {
+        let n = self.mask_steps.len();
+        let behind = match &self.mask_ckpt {
+            Some((c, _)) => n - c,
+            None => n,
+        };
+        if behind >= CHECKPOINT_EVERY {
+            if let Some(m) = &self.mask {
+                self.mask_ckpt = Some((n, m.clone()));
+            }
+        }
+    }
+
+    /// Rebuild the mask from the remaining steps, then invalidate the preview.
+    fn rebuild_mask(&mut self) {
+        if self.mask_ckpt.as_ref().is_some_and(|(n, _)| *n > self.mask_steps.len()) {
+            self.mask_ckpt = None;
+        }
+        let (w, h) = match self.source.as_ref() {
+            Some(s) => (s.w, s.h),
+            None => return,
+        };
+        let ckpt = self.mask_ckpt.as_ref().map(|(n, p)| (*n, p));
+        self.mask = mask::replay(&self.mask_steps, w, h, ckpt);
+        self.mask_version += 1;
+    }
+
+    /// Undo the last committed touch-up step.
+    fn undo_mask(&mut self) {
+        if self.stroke.is_some() || self.mask_open.is_some() {
+            return;
+        }
+        if let Some(step) = self.mask_steps.pop() {
+            self.mask_redo.push(step);
+            self.rebuild_mask();
+        }
+    }
+
+    /// Redo the most recently undone touch-up step.
+    fn redo_mask(&mut self) {
+        if self.stroke.is_some() || self.mask_open.is_some() {
+            return;
+        }
+        if let Some(step) = self.mask_redo.pop() {
+            self.mask_steps.push(step);
+            self.rebuild_mask();
+            self.take_checkpoint();
+        }
     }
 
     /// Keep the proxy-resolution mask copy in step while fast (drag/stroke) renders run.
@@ -662,6 +769,10 @@ impl App {
         self.mask_gamma = BRUSH_GAMMA_DEFAULT;
         self.brush_soft = BRUSH_SOFT_DEFAULT;
         self.stroke = None;
+        self.mask_steps.clear();
+        self.mask_redo.clear();
+        self.mask_open = None;
+        self.mask_ckpt = None;
         if self.mask.take().is_some() {
             self.mask_version += 1;
         }
@@ -1025,13 +1136,29 @@ impl App {
                 }
             }
             if ui
+                .add_enabled(!self.mask_steps.is_empty(), egui::Button::new("Undo"))
+                .on_hover_text("Undo the last touch-up action (Ctrl+Z).")
+                .clicked()
+            {
+                self.undo_mask();
+            }
+            if ui
+                .add_enabled(!self.mask_redo.is_empty(), egui::Button::new("Redo"))
+                .on_hover_text("Redo the last undone touch-up action (Ctrl+Y or Ctrl+Shift+Z).")
+                .clicked()
+            {
+                self.redo_mask();
+            }
+            if ui
                 .add_enabled(self.mask.is_some(), egui::Button::new("Clear"))
-                .on_hover_text("Remove all painted and filled areas.")
+                .on_hover_text("Remove all painted and filled areas (Ctrl+Z brings them back).")
                 .clicked()
             {
                 self.mask = None;
                 self.mask_version += 1;
                 self.poly.clear();
+                self.mask_redo.clear();
+                self.mask_steps.push(mask::Step::Clear);
             }
         });
         if self.tool != Tool::Crop {
@@ -1339,6 +1466,7 @@ impl App {
                     }
                 } else {
                     if resp.drag_started() {
+                        self.open_stroke();
                         self.stroke = Some((ix, iy));
                         self.dab_at(ix, iy);
                     } else if resp.dragged() {
@@ -1357,6 +1485,7 @@ impl App {
                     }
                     if resp.drag_stopped() {
                         self.stroke = None;
+                        self.commit_step();
                     }
                 }
             }
@@ -1765,6 +1894,14 @@ impl eframe::App for App {
                 self.open_dialog(ctx);
             } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
                 self.quick_save(ctx);
+            } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
+                if ctx.input(|i| i.modifiers.shift) {
+                    self.redo_mask();
+                } else {
+                    self.undo_mask();
+                }
+            } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) {
+                self.redo_mask();
             } else if self.tool == Tool::Polygon && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.close_polygon();
             } else if self.fit_mode == 0 && self.drag.is_none() && self.tool == Tool::Crop {
@@ -1923,6 +2060,62 @@ mod interaction {
         app.tool = Tool::Crop;
         app.reset_settings();
         assert!(app.mask.is_none(), "reset clears the mask");
+        assert!(app.mask_steps.is_empty(), "reset clears the history too");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn touch_up_steps_undo_and_redo_exactly() {
+        let (w, h) = (200u32, 120u32);
+        let mut data = Vec::with_capacity((w * h * 3) as usize);
+        for _ in 0..h {
+            for x in 0..w {
+                data.push((x % 256) as u8);
+                data.push(64);
+                data.push(96);
+            }
+        }
+        let path = std::env::temp_dir().join("ddn_dither_undo_regression.png");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut enc = png::Encoder::new(file, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&data).unwrap();
+
+        let ctx = egui::Context::default();
+        let cli = cli::parse(&["ddn-dither".to_string()]).unwrap();
+        let mut app = App::build(&ctx, cli);
+        app.load(&ctx, path.to_str().unwrap());
+        let w = app.source.as_ref().unwrap().w;
+
+        app.tool = Tool::Paint;
+        app.open_stroke();
+        app.dab_at(100.0, 60.0);
+        app.stroke = None;
+        app.commit_step();
+        assert_eq!(app.mask_steps.len(), 1, "one stroke is one undo step");
+        let painted = app.mask.as_ref().unwrap().clone();
+        assert_eq!(painted.data[60 * w + 100], 255);
+
+        app.undo_mask();
+        assert!(app.mask.is_none(), "undoing the only stroke empties the mask");
+        app.redo_mask();
+        assert_eq!(app.mask.as_ref().unwrap(), &painted, "redo restores the stroke");
+
+        app.tool = Tool::Erase;
+        app.open_stroke();
+        app.dab_at(100.0, 60.0);
+        app.stroke = None;
+        app.commit_step();
+        let erased = app.mask.as_ref().unwrap().clone();
+        assert!(erased.data[60 * w + 100] < painted.data[60 * w + 100]);
+        app.undo_mask();
+        assert_eq!(app.mask.as_ref().unwrap(), &painted, "undo removes the erase");
+        app.undo_mask();
+        assert!(app.mask.is_none());
+        app.redo_mask();
+        app.redo_mask();
+        assert_eq!(app.mask.as_ref().unwrap(), &erased, "double redo lands on the erase");
         let _ = std::fs::remove_file(&path);
     }
 }
