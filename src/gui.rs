@@ -453,7 +453,7 @@ impl App {
             None => return,
         };
         let m = self.mask.get_or_insert_with(|| Plane::new(w, h, vec![0; w * h]));
-        mask::fill_polygon(m, &pts, self.tool == Tool::Erase);
+        mask::fill_polygon(m, &pts, self.brush_r * self.brush_soft / 100.0, self.tool == Tool::Erase);
         self.mask_version += 1;
     }
 
@@ -1016,7 +1016,7 @@ impl App {
                         Tool::Crop => "Back to moving and resizing the selection rectangle.",
                         Tool::Paint => "Paint areas that the Gamma slider below brightens or darkens - for lifting detail out of dark shadows. Mouse wheel over the picture changes the brush size.",
                         Tool::Erase => "Remove painted areas; the brush size follows the mouse wheel over the picture, too.",
-                        Tool::Polygon => "Fill a polygon region with full strength: click the corners, click the first corner again (it highlights) or press Enter to close the shape, right-click removes the last corner. With the Erase tool active, a polygon erases its region instead.",
+                        Tool::Polygon => "Fill a polygon region: click the corners, click the first corner again (it highlights) or press Enter to close the shape, right-click removes the last corner. Edges feather outward by Softness of the brush radius. With the Erase tool active, a polygon erases its region instead.",
                     })
                     .clicked()
                 {
@@ -1050,7 +1050,7 @@ impl App {
             .response
             .on_hover_text("Strength applied where you painted or filled (Polygon), before the contrast stretch. Below 1.00 brightens, above 1.00 darkens. Arrow keys, mouse wheel over the box or dragging all move in 0.05 steps.");
         }
-        if matches!(self.tool, Tool::Paint | Tool::Erase) {
+        if self.tool != Tool::Crop {
             ui.horizontal(|ui| {
                 ui.label("Softness");
                 wheel_slider(ui, &mut self.wheel_acc, &mut self.brush_soft, |v| {
@@ -1069,7 +1069,7 @@ impl App {
             ));
         }
         if self.tool == Tool::Polygon {
-            ui.weak("Click the corners; click the first corner again or press Enter to fill; right-click removes a corner.");
+            ui.weak("Click the corners; click the first corner again or press Enter to fill; right-click removes a corner. Edge glow = Softness % of the brush radius (wheel over the picture).");
         }
         ui.separator();
 
@@ -1327,7 +1327,7 @@ impl App {
                 if self.tool == Tool::Polygon {
                     if resp.secondary_clicked() {
                         self.poly.pop();
-                    } else if resp.drag_started_by(egui::PointerButton::Primary) {
+                    } else if resp.clicked() {
                         let snap = 10.0 / scale;
                         let near_start = self.poly.len() >= 3
                             && self.poly.first().is_some_and(|(fx, fy)| (ix - fx).hypot(iy - fy) <= snap);
@@ -1470,7 +1470,15 @@ impl App {
                 let (ix, iy) = to_img(pos);
                 let snap = 10.0 / scale;
                 let near = self.poly.len() >= 3 && (ix - self.poly[0].0).hypot(iy - self.poly[0].1) <= snap;
-                painter.line_segment([start, to_screen(ix, iy)], Stroke::new(1.5_f32, if near { Color32::YELLOW } else { Color32::WHITE }));
+                let cursor = to_screen(ix, iy);
+                let last = *self.poly.last().unwrap();
+                painter.line_segment([to_screen(last.0, last.1), cursor], line);
+                if self.poly.len() >= 3 {
+                    painter.line_segment(
+                        [start, cursor],
+                        Stroke::new(1.0_f32, if near { Color32::YELLOW } else { Color32::from_white_alpha(90) }),
+                    );
+                }
             }
             for &(fx, fy) in &self.poly {
                 painter.circle_filled(to_screen(fx, fy), 2.5, Color32::YELLOW);

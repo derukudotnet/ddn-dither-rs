@@ -64,41 +64,82 @@ fn coverage(d: f64, soft: f64) -> f64 {
     }
 }
 
-/// Set or erase the coverage inside a closed polygon with a scanline fill (even-odd rule).
+/// Set or erase the coverage inside a closed polygon, feathering outward by `feather` pixels.
 ///
-/// `erase` resets the covered area to 0, otherwise it is set to full coverage.
-/// Edges are hard; the brush with high softness is the tool for fading borders. Fewer than
-/// three points or self-intersecting outlines fall back to the standard even-odd behaviour.
-pub fn fill_polygon(mask: &mut Plane, pts: &[(f64, f64)], erase: bool) {
+/// `erase` scales the covered coverage down by the fill strength, otherwise it is merged in at
+/// full strength. The interior is always full coverage; `feather` extends a linear falloff
+/// beyond the outline so edges glow softly instead of cutting off. Fewer than three points or
+/// self-intersecting outlines follow the standard even-odd rule.
+pub fn fill_polygon(mask: &mut Plane, pts: &[(f64, f64)], feather: f64, erase: bool) {
     let n = pts.len();
     if n < 3 || mask.w == 0 || mask.h == 0 {
         return;
     }
-    let min_y = pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).floor().max(0.0) as usize;
-    let max_y = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max).ceil() as usize + 1;
-    let (y0, y1) = (min_y.min(mask.h), max_y.min(mask.h));
+    let band = feather.max(0.0);
+    let min_x = pts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min) - band;
+    let max_x = pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max) + band;
+    let min_y = pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min) - band;
+    let max_y = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max) + band;
+    let x0 = (min_x.floor().max(0.0) as usize).min(mask.w);
+    let x1 = ((max_x.ceil() as usize) + 1).min(mask.w);
+    let y0 = (min_y.floor().max(0.0) as usize).min(mask.h);
+    let y1 = ((max_y.ceil() as usize) + 1).min(mask.h);
     for y in y0..y1 {
-        let yc = y as f64 + 0.5;
-        let mut xs: Vec<f64> = Vec::new();
-        for i in 0..n {
-            let (ax, ay) = pts[i];
-            let (bx, by) = pts[(i + 1) % n];
-            if (ay <= yc && by > yc) || (by <= yc && ay > yc) {
-                xs.push(ax + (yc - ay) / (by - ay) * (bx - ax));
-            }
-        }
-        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        for [xa, xb] in xs.as_chunks::<2>().0 {
-            let fx0 = (xa.round().max(0.0) as usize).min(mask.w);
-            let fx1 = (xb.round().max(0.0) as usize).min(mask.w);
-            if fx0 >= fx1 {
+        for x in x0..x1 {
+            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+            let strength = if point_in_polygon(px, py, pts) {
+                1.0
+            } else if band > 0.0 {
+                (1.0 - edge_distance(px, py, pts) / band).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if strength <= 0.0 {
                 continue;
             }
-            for x in fx0..fx1 {
-                mask.data[y * mask.w + x] = if erase { 0 } else { 255 };
+            let i = y * mask.w + x;
+            mask.data[i] = if erase {
+                (mask.data[i] as f64 * (1.0 - strength)) as u8
+            } else {
+                mask.data[i].max((strength * 255.0) as u8)
+            };
+        }
+    }
+}
+
+fn point_in_polygon(px: f64, py: f64, pts: &[(f64, f64)]) -> bool {
+    let n = pts.len();
+    let mut inside = false;
+    for i in 0..n {
+        let (ax, ay) = pts[i];
+        let (bx, by) = pts[(i + 1) % n];
+        if (ay <= py && by > py) || (by <= py && ay > py) {
+            let x_int = ax + (py - ay) / (by - ay) * (bx - ax);
+            if x_int >= px {
+                inside = !inside;
             }
         }
     }
+    inside
+}
+
+fn edge_distance(px: f64, py: f64, pts: &[(f64, f64)]) -> f64 {
+    let n = pts.len();
+    let mut best = f64::INFINITY;
+    for i in 0..n {
+        let (ax, ay) = pts[i];
+        let (bx, by) = pts[(i + 1) % n];
+        let (dx, dy) = (bx - ax, by - ay);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 {
+            (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let d = (px - (ax + t * dx)).hypot(py - (ay + t * dy));
+        best = best.min(d);
+    }
+    best
 }
 
 /// Curve masked pixels toward the gamma `g` (1.0 = no-op), blended by coverage.
@@ -213,6 +254,7 @@ mod tests {
         fill_polygon(
             &mut mask,
             &[(2.0, 2.0), (8.0, 2.0), (8.0, 8.0), (2.0, 8.0)],
+            0.0,
             false,
         );
         for y in 0..10 {
@@ -227,25 +269,43 @@ mod tests {
     fn polygon_erase_resets_the_inside() {
         let mut mask = Plane::new(10, 10, vec![0; 100]);
         let square = [(2.0, 2.0), (8.0, 2.0), (8.0, 8.0), (2.0, 8.0)];
-        fill_polygon(&mut mask, &square, false);
+        fill_polygon(&mut mask, &square, 0.0, false);
         dab(&mut mask, 5.0, 5.0, 2.0, 0.5);
         assert!(mask.data[5 * 10 + 5] == 255);
-        fill_polygon(&mut mask, &square, true);
+        fill_polygon(&mut mask, &square, 0.0, true);
         assert!(mask.data.iter().all(|&v| v == 0));
     }
 
     #[test]
     fn polygon_triangle_is_half_the_bounding_square() {
         let mut mask = Plane::new(8, 8, vec![0; 64]);
-        fill_polygon(&mut mask, &[(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)], false);
+        fill_polygon(&mut mask, &[(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)], 0.0, false);
         let covered = mask.data.iter().filter(|&&v| v == 255).count();
         assert_eq!(covered, 36, "8+7+6+...+1 pixels fill the upper-left triangle");
     }
 
     #[test]
+    fn polygon_feather_grows_outward_softly() {
+        let mut mask = Plane::new(12, 10, vec![0; 120]);
+        let square = [(2.0, 2.0), (8.0, 2.0), (8.0, 8.0), (2.0, 8.0)];
+        fill_polygon(&mut mask, &square, 2.0, false);
+        assert_eq!(mask.data[5 * 12 + 5], 255);
+        let glow = mask.data[5 * 12 + 9];
+        assert!(glow > 0 && glow < 255, "one pixel outside fades softly: {glow}");
+        assert_eq!(mask.data[5 * 12 + 11], 0);
+
+        let mut full = Plane::new(12, 10, vec![255; 120]);
+        fill_polygon(&mut full, &square, 2.0, true);
+        assert_eq!(full.data[5 * 12 + 5], 0);
+        let faded = full.data[5 * 12 + 9];
+        assert!(faded > 0 && faded < 255, "erasing fades instead of hard-zeroing: {faded}");
+        assert_eq!(full.data[5 * 12 + 11], 255);
+    }
+
+    #[test]
     fn polygon_with_fewer_than_three_points_is_ignored() {
         let mut mask = Plane::new(4, 4, vec![0; 16]);
-        fill_polygon(&mut mask, &[(1.0, 1.0), (3.0, 3.0)], false);
+        fill_polygon(&mut mask, &[(1.0, 1.0), (3.0, 3.0)], 0.0, false);
         assert!(mask.data.iter().all(|&v| v == 0));
     }
 
